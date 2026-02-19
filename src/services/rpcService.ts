@@ -1,5 +1,6 @@
 import { formatError } from '../utils/errorFormatter';
 import { CliErrorContext, CliErrorType } from '../utils/cliErrorParser';
+import { RpcLogger } from './rpcLogger';
 
 export interface SimulationResult {
     success: boolean;

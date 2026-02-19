@@ -147,6 +147,14 @@ export class SidebarWebView {
             background: var(--vscode-descriptionForeground);
             color: var(--vscode-editor-background);
         }
+        .status-version {
+            background: rgba(180,120,255,0.25);
+            color: #c792ea;
+        }
+        .status-mismatch {
+            background: rgba(241,76,76,0.15);
+            color: var(--vscode-errorForeground, #f14c4c);
+        }
         .functions-list {
             margin-top: 8px;
             padding-top: 8px;
@@ -248,14 +256,26 @@ export class SidebarWebView {
 
             const deployedAt = contract.lastDeployed ?? contract.deployedAt;
 
+            const localVersion    = contract.localVersion;
+            const deployedVersion = contract.deployedVersion;
+            const hasMismatch     = contract.hasVersionMismatch;
+
             return `
                 <div class="contract-item">
                     <div class="contract-name">
                         ${this.escapeHtml(contract.name)}
                         <span class="status-badge ${statusClass}">${statusText}</span>
                         <span class="status-badge ${buildStatusClass}">${buildStatus}</span>
+                        ${localVersion ? `<span class="status-badge status-version">v${this.escapeHtml(localVersion)}</span>` : ''}
+                        ${hasMismatch  ? `<span class="status-badge status-mismatch">⚠ Mismatch</span>` : ''}
                     </div>
                     <div class="contract-path">${this.escapeHtml(contract.path)}</div>
+                    ${deployedVersion
+                        ? `<div class="timestamp">Deployed version: <strong>v${this.escapeHtml(deployedVersion)}</strong></div>`
+                        : ''}
+                    ${hasMismatch && contract.versionMismatchMessage
+                        ? `<div class="timestamp" style="color:var(--vscode-errorForeground)">⚠ ${this.escapeHtml(contract.versionMismatchMessage)}</div>`
+                        : ''}
                     ${contract.contractId
                         ? `<div class="contract-id">ID: ${this.escapeHtml(contract.contractId)}</div>`
                         : ''}

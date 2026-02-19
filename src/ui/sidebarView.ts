@@ -17,6 +17,7 @@ import {
     ContractContextMenuService,
 } from '../services/contextMenuService';
 import { ReorderingService } from '../services/reorderingService';
+import { ContractVersionTracker, ContractVersionState } from '../services/contractVersionTracker';
 
 export interface ContractInfo {
     name: string;
@@ -33,6 +34,14 @@ export interface ContractInfo {
         name: string;
         parameters: Array<{ name: string; type?: string }>;
     }>;
+    /** Version declared in Cargo.toml. */
+    localVersion?: string;
+    /** Version that was active at the last deploy. */
+    deployedVersion?: string;
+    /** Whether localVersion and deployedVersion conflict. */
+    hasVersionMismatch?: boolean;
+    /** Short mismatch warning, if any. */
+    versionMismatchMessage?: string;
 }
 
 export interface DeploymentRecord {
@@ -50,6 +59,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     private readonly outputChannel: vscode.OutputChannel;
     private readonly contextMenuService: ContractContextMenuService;
     private readonly reorderingService: ReorderingService;
+    private readonly versionTracker: ContractVersionTracker;
 
     // Cache the last-discovered list so drag messages can reference it
     private _lastContracts: ContractInfo[] = [];
@@ -64,6 +74,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
             this.outputChannel
         );
         this.reorderingService = new ReorderingService(
+            this._context,
+            this.outputChannel
+        );
+        this.versionTracker = new ContractVersionTracker(
             this._context,
             this.outputChannel
         );
@@ -163,8 +177,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                         this._lastContracts = reordered;
                         this._view?.webview.postMessage({
                             type: 'update',
-                            contracts:   reordered,
-                            deployments: this._getDeploymentHistory(),
+                            contracts:     reordered,
+                            deployments:   this._getDeploymentHistory(),
+                            versionStates: this._getVersionStates(reordered),
                         });
                     } catch (err) {
                         const msg = err instanceof Error ? err.message : String(err);
@@ -175,8 +190,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                         });
                         this._view?.webview.postMessage({
                             type: 'update',
-                            contracts:   this._lastContracts,
-                            deployments: this._getDeploymentHistory(),
+                            contracts:     this._lastContracts,
+                            deployments:   this._getDeploymentHistory(),
+                            versionStates: this._getVersionStates(this._lastContracts),
                         });
                     }
                     break;
@@ -186,8 +202,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                     this.outputChannel.appendLine('[Reordering] Drag cancelled — restoring order');
                     this._view?.webview.postMessage({
                         type: 'update',
-                        contracts:   this._lastContracts,
-                        deployments: this._getDeploymentHistory(),
+                        contracts:     this._lastContracts,
+                        deployments:   this._getDeploymentHistory(),
+                        versionStates: this._getVersionStates(this._lastContracts),
                     });
                     break;
                 }
@@ -198,6 +215,43 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                     this._view?.webview.postMessage({
                         type: 'actionFeedback',
                         feedback: { type: 'info', message: 'Contract order reset to default.' },
+                    });
+                    break;
+                }
+
+                // ── Version tracking ──────────────────────────
+
+                case 'version:getHistory': {
+                    const contractPath = message['contractPath'] as string | undefined;
+                    if (!contractPath) { break; }
+                    const history = this.versionTracker.getVersionHistory(contractPath);
+                    this._view?.webview.postMessage({ type: 'version:history', contractPath, history });
+                    break;
+                }
+
+                case 'version:tag': {
+                    const contractPath = message['contractPath'] as string | undefined;
+                    const entryId     = message['entryId']      as string | undefined;
+                    const label       = message['label']        as string | undefined;
+                    if (!contractPath || !entryId || !label) { break; }
+                    const ok = await this.versionTracker.tagVersion(contractPath, entryId, label);
+                    this._view?.webview.postMessage({
+                        type: 'actionFeedback',
+                        feedback: ok
+                            ? { type: 'success', message: `Version tagged as "${label}".` }
+                            : { type: 'error',   message: 'Failed to tag version — entry not found.' },
+                    });
+                    break;
+                }
+
+                case 'version:clearHistory': {
+                    const contractPath = message['contractPath'] as string | undefined;
+                    if (!contractPath) { break; }
+                    await this.versionTracker.clearVersionHistory(contractPath);
+                    this.refresh();
+                    this._view?.webview.postMessage({
+                        type: 'actionFeedback',
+                        feedback: { type: 'info', message: 'Version history cleared.' },
                     });
                     break;
                 }
@@ -218,8 +272,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         const ordered       = this.reorderingService.applyOrder(discovered);
         this._lastContracts = ordered;
 
-        const deployments = this._getDeploymentHistory();
-        this._view.webview.postMessage({ type: 'update', contracts: ordered, deployments });
+        const deployments    = this._getDeploymentHistory();
+        const versionStates  = this._getVersionStates(ordered);
+        this._view.webview.postMessage({ type: 'update', contracts: ordered, deployments, versionStates });
+    }
+
+    /** Expose versionTracker for use by commands (e.g. deployContract). */
+    public getVersionTracker(): ContractVersionTracker {
+        return this.versionTracker;
     }
 
     public showDeploymentResult(deploymentInfo: unknown) {
@@ -291,14 +351,23 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 const contractId = deployedContracts[rootPath];
                 const config     = vscode.workspace.getConfiguration('stellarSuite');
 
+                // ── Version info ──────────────────────────────
+                const versionState = this.versionTracker.getContractVersionState(
+                    cargoPath, contractName
+                );
+
                 results.push({
-                    name:       contractName,
-                    path:       cargoPath,
+                    name:                 contractName,
+                    path:                 cargoPath,
                     contractId,
                     isBuilt,
-                    hasWasm:    isBuilt,
-                    network:    config.get<string>('network', 'testnet'),
-                    source:     config.get<string>('source',  'dev'),
+                    hasWasm:              isBuilt,
+                    network:              config.get<string>('network', 'testnet'),
+                    source:               config.get<string>('source',  'dev'),
+                    localVersion:         versionState.localVersion,
+                    deployedVersion:      versionState.deployedVersion,
+                    hasVersionMismatch:   versionState.hasMismatch,
+                    versionMismatchMessage: versionState.mismatch?.message,
                 });
                 return results;
             }
@@ -315,6 +384,12 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
     private _getDeploymentHistory(): DeploymentRecord[] {
         return this._context.workspaceState.get<DeploymentRecord[]>('stellarSuite.deploymentHistory', []);
+    }
+
+    private _getVersionStates(contracts: ContractInfo[]): ContractVersionState[] {
+        return contracts.map(c =>
+            this.versionTracker.getContractVersionState(c.path, c.name)
+        );
     }
 
     // ── HTML ──────────────────────────────────────────────────
@@ -491,6 +566,8 @@ body {
 .badge-deployed  { background: rgba(63,185,80,.2);      color: var(--color-success); border: 1px solid rgba(63,185,80,.4); }
 .badge-built     { background: var(--color-accent-dim); color: var(--color-accent);  border: 1px solid rgba(88,166,255,.3); }
 .badge-not-built { background: rgba(255,255,255,.05);   color: var(--color-muted);   border: 1px solid var(--color-border); }
+.badge-version   { background: rgba(180,120,255,.15);   color: #b478ff;              border: 1px solid rgba(180,120,255,.35); }
+.badge-mismatch  { background: rgba(241,76,76,.15);     color: var(--color-danger);  border: 1px solid rgba(241,76,76,.4); }
 
 .contract-meta {
     font-size:     11px;
@@ -603,6 +680,53 @@ body {
 .toast.error   { border-left: 3px solid var(--color-danger);  }
 .toast.info    { border-left: 3px solid var(--color-accent);  }
 
+/* ── Version history panel ──────────────────────────────── */
+#version-panel {
+    position:      fixed;
+    top:           0; right: 0; bottom: 0;
+    width:         280px;
+    background:    var(--color-card);
+    border-left:   1px solid var(--color-border);
+    box-shadow:    var(--shadow);
+    z-index:       900;
+    display:       none;
+    flex-direction: column;
+    overflow:      hidden;
+}
+#version-panel.visible { display: flex; }
+.version-panel-header {
+    display:         flex;
+    align-items:     center;
+    justify-content: space-between;
+    padding:         10px 12px;
+    background:      var(--color-bg);
+    border-bottom:   1px solid var(--color-border);
+    font-size:       12px;
+    font-weight:     700;
+}
+.version-panel-body { flex: 1; overflow-y: auto; padding: 8px; }
+.version-entry {
+    background:    var(--color-bg);
+    border:        1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding:       7px 10px;
+    margin-bottom: 5px;
+    font-size:     11px;
+}
+.version-entry-ver  { font-weight: 700; color: var(--color-accent); margin-bottom: 2px; }
+.version-entry-meta { color: var(--color-muted); margin-bottom: 3px; }
+.version-entry-tag  { font-size: 10px; color: #b478ff; margin-bottom: 3px; }
+.version-entry.deployed { border-left: 3px solid var(--color-success); }
+.version-mismatch-banner {
+    background:    rgba(241,76,76,.1);
+    border:        1px solid rgba(241,76,76,.4);
+    border-radius: var(--radius);
+    padding:       6px 10px;
+    font-size:     11px;
+    color:         var(--color-danger);
+    margin-bottom: 8px;
+}
+
 /* ── Deployments ────────────────────────────────────────── */
 #deployments-list { padding: 0 8px 16px; }
 .deployment-card {
@@ -650,6 +774,15 @@ body {
     <div class="empty-state" style="padding:12px 16px">No deployments recorded.</div>
 </div>
 
+<!-- ── Version History Panel ────────────────────────────── -->
+<div id="version-panel" role="complementary" aria-label="Version history">
+    <div class="version-panel-header">
+        <span id="version-panel-title">Version History</span>
+        <button class="icon-btn" onclick="hideVersionPanel()" title="Close">✕</button>
+    </div>
+    <div class="version-panel-body" id="version-panel-body"></div>
+</div>
+
 <!-- ── Context Menu ──────────────────────────────────────── -->
 <div id="context-menu" role="menu" aria-label="Contract options"></div>
 
@@ -661,6 +794,7 @@ const vscode = acquireVsCodeApi();
 
 // ── State ─────────────────────────────────────────────────────
 let _contracts          = [];
+let _versionStates      = [];
 let _activeMenuContract = null;
 let _dragPath           = null;
 let _dragEl             = null;
@@ -671,15 +805,20 @@ window.addEventListener('message', (event) => {
     const msg = event.data;
     switch (msg.type) {
         case 'update':
-            _contracts = msg.contracts || [];
+            _contracts     = msg.contracts     || [];
+            _versionStates = msg.versionStates  || [];
             renderContracts(_contracts);
             renderDeployments(msg.deployments || []);
+            renderVersionMismatches(_versionStates);
             break;
         case 'contextMenu:show':
             showContextMenu(msg);
             break;
         case 'actionFeedback':
             showToast(msg.feedback);
+            break;
+        case 'version:history':
+            displayVersionHistory(msg.contractPath, msg.history || []);
             break;
     }
 });
@@ -741,10 +880,14 @@ function renderContracts(contracts) {
                 \${c.isBuilt
                     ? '<span class="badge badge-built">Built</span>'
                     : '<span class="badge badge-not-built">Not Built</span>'}
+                \${c.localVersion ? \`<span class="badge badge-version" title="Local version">v\${esc(c.localVersion)}</span>\` : ''}
+                \${c.hasVersionMismatch ? '<span class="badge badge-mismatch" title="Version mismatch detected">⚠ Mismatch</span>' : ''}
             </div>
 
-            \${c.contractId ? \`<div class="contract-id" title="\${esc(c.contractId)}">ID: \${esc(c.contractId)}</div>\` : ''}
-            \${c.deployedAt ? \`<div class="contract-meta">Deployed: \${esc(c.deployedAt)}</div>\` : ''}
+            \${c.contractId   ? \`<div class="contract-id" title="\${esc(c.contractId)}">ID: \${esc(c.contractId)}</div>\` : ''}
+            \${c.deployedAt  ? \`<div class="contract-meta">Deployed: \${esc(c.deployedAt)}</div>\` : ''}
+            \${c.deployedVersion ? \`<div class="contract-meta" style="font-size:10px">Deployed version: <strong>v\${esc(c.deployedVersion)}</strong></div>\` : ''}
+            \${c.hasVersionMismatch ? \`<div class="contract-meta" style="color:var(--color-danger);font-size:10px">⚠ \${esc(c.versionMismatchMessage || 'Version mismatch')}</div>\` : ''}
 
             <div class="card-actions">
                 <button class="action-btn"
@@ -758,6 +901,9 @@ function renderContracts(contracts) {
                         onclick="sendAction('inspect', this.closest('.contract-card'))"
                         \${!c.contractId ? 'disabled' : ''}
                         title="Inspect contract">Inspect</button>
+                <button class="action-btn secondary"
+                        onclick="showVersionHistory(\${esc(JSON.stringify(c.path))}, this.closest('.contract-card'))"
+                        title="Show version history">History</button>
             </div>
         </div>
     \`).join('');
@@ -938,7 +1084,71 @@ function showToast(feedback) {
         setTimeout(() => toast.remove(), 320);
     }, 3500);
 }
+// ── Version mismatches banner ────────────────────────────────
 
+function renderVersionMismatches(states) {
+    const mismatches = (states || []).filter(s => s.hasMismatch);
+    const existing   = document.getElementById('version-mismatches-banner');
+    if (existing) { existing.remove(); }
+    if (!mismatches.length) { return; }
+    const banner = document.createElement('div');
+    banner.id        = 'version-mismatches-banner';
+    banner.className = 'version-mismatch-banner';
+    banner.style.cssText = 'margin: 0 8px 8px;';
+    banner.innerHTML = \`⚠ <strong>\${mismatches.length} version mismatch(es) detected.</strong>\` +
+        mismatches.map(m => \`<div style="margin-top:4px">\${esc(m.contractName)}: local <strong>\${esc(m.localVersion)}</strong> vs deployed <strong>\${esc(m.deployedVersion)}</strong></div>\`).join('');
+    const contractsList = document.getElementById('contracts-list');
+    contractsList?.parentNode?.insertBefore(banner, contractsList);
+}
+
+// ── Version history panel ─────────────────────────────────────
+
+function showVersionHistory(contractPath, card) {
+    vscode.postMessage({ type: 'version:getHistory', contractPath });
+}
+
+function hideVersionPanel() {
+    document.getElementById('version-panel').classList.remove('visible');
+}
+
+function displayVersionHistory(contractPath, history) {
+    const panel     = document.getElementById('version-panel');
+    const body      = document.getElementById('version-panel-body');
+    const titleEl   = document.getElementById('version-panel-title');
+
+    // Find contract name
+    const contract  = _contracts.find(c => c.path === contractPath);
+    titleEl.textContent = \`Version History — \${contract ? contract.name : contractPath}\`;
+
+    if (!history.length) {
+        body.innerHTML = '<div class="empty-state" style="padding:16px">No version history recorded.</div>';
+    } else {
+        const entries = [...history].reverse(); // newest first
+        body.innerHTML = entries.map(e => \`
+            <div class="version-entry\${e.isDeployed ? ' deployed' : ''}">
+                <div class="version-entry-ver">v\${esc(e.version)}\${e.isDeployed ? ' 🚀' : ''}</div>
+                \${e.label ? \`<div class="version-entry-tag">🏷 \${esc(e.label)}</div>\` : ''}
+                <div class="version-entry-meta">\${new Date(e.recordedAt).toLocaleString()}</div>
+                \${e.network    ? \`<div class="version-entry-meta">Network: \${esc(e.network)}</div>\` : ''}
+                \${e.contractId ? \`<div class="version-entry-meta" style="font-size:10px;word-break:break-all">ID: \${esc(e.contractId)}</div>\` : ''}
+                <div style="margin-top:6px;display:flex;gap:4px">
+                    <button class="action-btn secondary" style="font-size:10px;padding:2px 7px"
+                        onclick="promptTagVersion(\${JSON.stringify(contractPath)}, \${JSON.stringify(e.id)})">Tag</button>
+                </div>
+            </div>
+        \`).join('');
+    }
+
+    panel.classList.add('visible');
+}
+
+function promptTagVersion(contractPath, entryId) {
+    const label = prompt('Enter a label for this version (e.g. "Initial release", "Bug-fix"):');
+    if (!label || !label.trim()) { return; }
+    vscode.postMessage({ type: 'version:tag', contractPath, entryId, label: label.trim() });
+    // Re-fetch history to reflect tag
+    setTimeout(() => vscode.postMessage({ type: 'version:getHistory', contractPath }), 300);
+}
 // ── Helpers ───────────────────────────────────────────────────
 
 function esc(str) {

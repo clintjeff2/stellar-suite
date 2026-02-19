@@ -7,18 +7,14 @@ import * as vscode from 'vscode';
 import { simulateTransaction } from './commands/simulateTransaction';
 import { deployContract } from './commands/deployContract';
 import { buildContract } from './commands/buildContract';
-import { registerRpcLoggingCommands } from './commands/rpcLoggingCommands';
-import { SidebarViewProvider } from './ui/sidebarView';
-import { RpcLogger } from './services/rpcLogger';
-
-let sidebarProvider: SidebarViewProvider | undefined;
-let rpcLogger: RpcLogger | undefined;
 import { registerGroupCommands } from './commands/groupCommands';
 import { SidebarViewProvider } from './ui/sidebarView';
 import { ContractGroupService } from './services/contractGroupService';
+import { ContractVersionTracker } from './services/contractVersionTracker';
 
 let sidebarProvider: SidebarViewProvider | undefined;
 let groupService: ContractGroupService | undefined;
+let versionTracker: ContractVersionTracker | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('Stellar Suite');
@@ -35,6 +31,10 @@ export function activate(context: vscode.ExtensionContext) {
         // Register group commands
         registerGroupCommands(context, groupService);
         outputChannel.appendLine('[Extension] Group commands registered');
+
+        // Initialize version tracker
+        versionTracker = new ContractVersionTracker(context, outputChannel);
+        outputChannel.appendLine('[Extension] Contract version tracker initialized');
 
         // ── Sidebar ───────────────────────────────────────────
         sidebarProvider = new SidebarViewProvider(context.extensionUri, context);
@@ -103,6 +103,20 @@ export function activate(context: vscode.ExtensionContext) {
             }
         );
 
+        // ── Version tracking commands ─────────────────────────
+        const showVersionMismatchesCommand = vscode.commands.registerCommand(
+            'stellarSuite.showVersionMismatches',
+            async () => {
+                if (!versionTracker) { return; }
+                const mismatches = versionTracker.getMismatches();
+                if (!mismatches.length) {
+                    vscode.window.showInformationMessage('Stellar Suite: No version mismatches detected.');
+                    return;
+                }
+                await versionTracker.notifyMismatches();
+            }
+        );
+
         outputChannel.appendLine('[Extension] All commands registered');
 
         // ── File watcher ──────────────────────────────────────
@@ -140,6 +154,7 @@ export function activate(context: vscode.ExtensionContext) {
             deployFromSidebarCommand,
             simulateFromSidebarCommand,
             copyContractIdCommand,
+            showVersionMismatchesCommand,
             watcher
         );
 
