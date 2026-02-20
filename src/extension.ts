@@ -13,6 +13,7 @@ import { registerSimulationHistoryCommands } from "./commands/simulationHistoryC
 import { registerBackupCommands } from "./commands/backupCommands";
 import { registerReplayCommands } from "./commands/replayCommands";
 import { registerResourceProfilingCommands } from "./commands/resourceProfilingCommands";
+import { registerEnvVariableCommands } from "./commands/envVariableCommands";
 
 // Services
 import { ContractGroupService } from "./services/contractGroupService";
@@ -26,6 +27,8 @@ import { CompilationStatusMonitor } from "./services/compilationStatusMonitor";
 import { StateBackupService } from "./services/stateBackupService";
 import { SimulationReplayService } from "./services/simulationReplayService";
 import { ResourceProfilingService } from "./services/resourceProfilingService";
+import { createEnvVariableService } from "./services/envVariableVscode";
+import { EnvVariableService } from "./services/envVariableService";
 
 // UI
 import { SidebarViewProvider } from "./ui/sidebarView";
@@ -50,6 +53,7 @@ let compilationStatusProvider: CompilationStatusProvider | undefined;
 let backupService: StateBackupService | undefined;
 let replayService: SimulationReplayService | undefined;
 let resourceProfilingService: ResourceProfilingService | undefined;
+let envVariableService: EnvVariableService | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel('Stellar Suite');
@@ -241,6 +245,13 @@ export function activate(context: vscode.ExtensionContext) {
       "[Extension] Resource profiling service initialized and commands registered",
     );
 
+    // ── Environment Variable Management ─────────────────────
+    envVariableService = createEnvVariableService(context);
+    registerEnvVariableCommands(context, envVariableService);
+    outputChannel.appendLine(
+      "[Extension] Environment variable service initialized and commands registered",
+    );
+
     outputChannel.appendLine("[Extension] All commands registered");
 
 
@@ -265,8 +276,8 @@ export function activate(context: vscode.ExtensionContext) {
       watcher,
       { dispose: () => metadataService?.dispose() },
       syncStatusProvider,
-      healthStatusBar ?? new vscode.Disposable(() => {}),
-      healthMonitor ?? new vscode.Disposable(() => {}),
+      healthStatusBar ?? new vscode.Disposable(() => { }),
+      healthMonitor ?? new vscode.Disposable(() => { }),
     );
 
     outputChannel.appendLine('[Extension] Extension activation complete');
