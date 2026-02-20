@@ -140,6 +140,15 @@ export class RpcFallbackService {
     }
 
     /**
+     * Update authentication headers for all managed RPC services.
+     */
+    public updateAuthHeaders(headers: Record<string, string>): void {
+        for (const service of this.services.values()) {
+            service.setAuthHeaders(headers);
+        }
+    }
+
+    /**
      * Check if any endpoint is available.
      */
     async isAnyAvailable(): Promise<boolean> {

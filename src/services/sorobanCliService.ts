@@ -87,7 +87,7 @@ export class SorobanCliService {
         functionName: string,
         args: any[],
         network: string = 'testnet',
-        options: { cancellationToken?: CancellationToken; timeoutMs?: number } = {}
+        options: { cancellationToken?: CancellationToken; timeoutMs?: number } = {},
         historySource: 'manual' | 'replay' | null = 'manual'
     ): Promise<SimulationResult> {
         const startTime = Date.now();

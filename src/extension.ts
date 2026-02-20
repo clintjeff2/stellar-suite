@@ -163,11 +163,11 @@ export function activate(context: vscode.ExtensionContext) {
     registerCliHistoryCommands(context, cliHistoryService, cliReplayService);
     outputChannel.appendLine('[Extension] CLI history and replay initialized');
 
-        // 5. Initialize Resource Profiling and Env Variable services
+    // 5. Initialize Resource Profiling and Env Variable services
     resourceProfilingService = new ResourceProfilingService(context, outputChannel);
     registerResourceProfilingCommands(context, resourceProfilingService);
     outputChannel.appendLine(
-        "[Extension] Resource profiling service initialized and commands registered",
+      "[Extension] Resource profiling service initialized and commands registered",
     );
 
     envVariableService = createEnvVariableService(context);
@@ -175,19 +175,21 @@ export function activate(context: vscode.ExtensionContext) {
 
     rpcLogger = new RpcLogger({ context, enableConsoleOutput: true });
     rpcLogger.loadLogs().catch(() => {
-        outputChannel.appendLine('[Extension] WARNING: could not load RPC logs');
+      outputChannel.appendLine('[Extension] WARNING: could not load RPC logs');
     });
     registerRpcLoggingCommands(context, rpcLogger);
 
     // ── RPC Authentication ──────────────────────────────────
     rpcAuthService = createRpcAuthService(context);
     const updateRpcAuthHeaders = async () => {
-        if (!rpcAuthService) return;
-        // No rpcService defined in this file — auth service initializes internally
+      if (!rpcAuthService || !fallbackService) return;
+      const headers = await rpcAuthService.getAuthHeaders();
+      fallbackService.updateAuthHeaders(headers);
     };
 
+    // Initialize headers on startup
     updateRpcAuthHeaders().catch(err => {
-        outputChannel.appendLine(`[Error] Failed to initialize RPC Auth: ${err}`);
+      outputChannel.appendLine(`[Error] Failed to initialize RPC Auth: ${err}`);
     });
 
     registerRpcAuthCommands(context, rpcAuthService, updateRpcAuthHeaders);
@@ -206,143 +208,93 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 7. Initialize UI
     sidebarProvider = new SidebarViewProvider(
-        context.extensionUri,
-        context,
-        cliHistoryService,
-        cliReplayService
+      context.extensionUri,
+      context,
+      cliHistoryService,
+      cliReplayService
     );
     context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider(
-            SidebarViewProvider.viewType,
-            sidebarProvider
-        )
+      vscode.window.registerWebviewViewProvider(
+        SidebarViewProvider.viewType,
+        sidebarProvider
+      )
     );
 
     simulationReplayService = new SimulationReplayService(
-        simulationHistoryService!,
-        outputChannel
+      simulationHistoryService!,
+      outputChannel
     );
 
     outputChannel.appendLine("[Extension] All commands registered");
+    // 7. Register Commands
+    const simulateCommand = vscode.commands.registerCommand(
+      "stellarSuite.simulateTransaction",
+      () => simulateTransaction(context, sidebarProvider, simulationHistoryService, cliHistoryService, fallbackService, resourceProfilingService)
+    );
 
-        // 7. Register Commands
-        const simulateCommand = vscode.commands.registerCommand(
-            "stellarSuite.simulateTransaction",
-            () => simulateTransaction(context, sidebarProvider, simulationHistoryService, fallbackService, resourceProfilingService)
-        );
+    const deployCommand = vscode.commands.registerCommand(
+      "stellarSuite.deployContract",
+      () => deployContract(context, sidebarProvider)
+    );
 
-        const deployCommand = vscode.commands.registerCommand(
-            "stellarSuite.deployContract",
-            () => deployContract(context, sidebarProvider)
-        );
+    const buildCommand = vscode.commands.registerCommand(
+      "stellarSuite.buildContract",
+      () => buildContract(context, sidebarProvider, compilationMonitor)
+    );
 
-        const buildCommand = vscode.commands.registerCommand(
-            "stellarSuite.buildContract",
-            () => buildContract(context, sidebarProvider, compilationMonitor)
-        );
+    const configureCliCommand = vscode.commands.registerCommand(
+      "stellarSuite.configureCli",
+      () => manageCliConfiguration(context)
+    );
 
-        const configureCliCommand = vscode.commands.registerCommand(
-            "stellarSuite.configureCli",
-            () => manageCliConfiguration(context)
-        );
+    const refreshCommand = vscode.commands.registerCommand(
+      "stellarSuite.refreshContracts",
+      () => sidebarProvider?.refresh()
+    );
 
-        const refreshCommand = vscode.commands.registerCommand(
-            "stellarSuite.refreshContracts",
-            () => sidebarProvider?.refresh()
-        );
+    const deployBatchCommand = vscode.commands.registerCommand(
+      "stellarSuite.deployBatch",
+      () => deployBatch(context)
+    );
 
-        const deployBatchCommand = vscode.commands.registerCommand(
-            "stellarSuite.deployBatch",
-            () => deployBatch(context)
-        );
+    const copyContractIdCommand = vscode.commands.registerCommand(
+      "stellarSuite.copyContractId",
+      async () => {
+        const id = await vscode.window.showInputBox({
+          title: "Copy Contract ID",
+          prompt: "Enter the contract ID to copy to clipboard",
+        });
+        if (id) {
+          await vscode.env.clipboard.writeText(id);
+          vscode.window.showInformationMessage("Contract ID copied to clipboard.");
+        }
+      }
+    );
 
-        const copyContractIdCommand = vscode.commands.registerCommand(
-            "stellarSuite.copyContractId",
-            async () => {
-                const id = await vscode.window.showInputBox({
-                    title: "Copy Contract ID",
-                    prompt: "Enter the contract ID to copy to clipboard",
-                });
-                if (id) {
-                    await vscode.env.clipboard.writeText(id);
-                    vscode.window.showInformationMessage("Contract ID copied to clipboard.");
-                }
-            }
-        );
+    const showVersionMismatchesCommand = vscode.commands.registerCommand(
+      "stellarSuite.showVersionMismatches",
+      async () => {
+        if (versionTracker) { await versionTracker.notifyMismatches(); }
+      }
+    );
 
-        const showVersionMismatchesCommand = vscode.commands.registerCommand(
-            "stellarSuite.showVersionMismatches",
-            async () => {
-                if (versionTracker) { await versionTracker.notifyMismatches(); }
-            }
-        );
+    const showCompilationStatusCommand = vscode.commands.registerCommand(
+      "stellarSuite.showCompilationStatus",
+      async () => {
+        if (compilationStatusProvider) { await compilationStatusProvider.showCompilationStatus(); }
+      }
+    );
 
-        const showCompilationStatusCommand = vscode.commands.registerCommand(
-            "stellarSuite.showCompilationStatus",
-            async () => {
-                if (compilationStatusProvider) { await compilationStatusProvider.showCompilationStatus(); }
-            }
-        );
+    registerSimulationHistoryCommands(context, simulationHistoryService!);
+    registerReplayCommands(context, simulationHistoryService!, simulationReplayService!, sidebarProvider, fallbackService);
+    registerHealthCommands(context, healthMonitor!);
 
-        registerSimulationHistoryCommands(context, simulationHistoryService!);
-        registerReplayCommands(context, simulationHistoryService!, replayService, sidebarProvider, fallbackService);
-        registerHealthCommands(context, healthMonitor!);
-
-        // Sidebar actions
-        const deployFromSidebarCommand = vscode.commands.registerCommand(
-            "stellarSuite.deployFromSidebar",
-            (contractId: string) => {
-                if (typeof contractId === 'string') {
-                    context.workspaceState.update('selectedContractPath', contractId);
-                }
-                return deployContract(context, sidebarProvider);
-            }
-        );
-
-        const simulateFromSidebarCommand = vscode.commands.registerCommand(
-            "stellarSuite.simulateFromSidebar",
-            (contractId: string) => simulateTransaction(context, sidebarProvider, simulationHistoryService, fallbackService, resourceProfilingService, contractId)
-        );
-
-        // 8. File Watchers
-        const watcher = vscode.workspace.createFileSystemWatcher("**/{Cargo.toml,*.wasm}");
-        const refreshOnChange = () => sidebarProvider?.refresh();
-        watcher.onDidChange(refreshOnChange);
-        watcher.onDidCreate(refreshOnChange);
-        watcher.onDidDelete(refreshOnChange);
-
-        // 9. Subscriptions
-        context.subscriptions.push(
-            simulateCommand,
-            deployCommand,
-            buildCommand,
-            configureCliCommand,
-            refreshCommand,
-            deployBatchCommand,
-            copyContractIdCommand,
-            showVersionMismatchesCommand,
-            showCompilationStatusCommand,
-            deployFromSidebarCommand,
-            simulateFromSidebarCommand,
-            watcher,
-            outputChannel,
-            healthMonitor!,
-            healthStatusBar!,
-            retryStatusBar || { dispose: () => { } },
-            retryService!,
-            fallbackService!,
-            { dispose: () => metadataService?.dispose() },
-            compilationMonitor || { dispose: () => { } },
-            compilationStatusProvider || { dispose: () => { } },
-            syncStatusProvider || { dispose: () => { } }
-        );
-
-        outputChannel.appendLine("[Extension] Extension activation complete");
-    } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        outputChannel.appendLine(`[Extension] ERROR during activation: ${errorMsg}`);
-        if (error instanceof Error && error.stack) {
-            outputChannel.appendLine(`[Extension] Stack: ${error.stack}`);
+    // Sidebar actions
+    const deployFromSidebarCommand = vscode.commands.registerCommand(
+      "stellarSuite.deployFromSidebar",
+      (contractId: string) => {
+        if (typeof contractId === 'string') {
+          context.workspaceState.update('selectedContractPath', contractId);
         }
         return deployContract(context, sidebarProvider);
       }
@@ -353,14 +305,14 @@ export function activate(context: vscode.ExtensionContext) {
       (contractId: string) => simulateTransaction(context, sidebarProvider, simulationHistoryService, cliHistoryService, fallbackService, resourceProfilingService, contractId)
     );
 
-    // 9. File Watchers
+    // 8. File Watchers
     const watcher = vscode.workspace.createFileSystemWatcher("**/{Cargo.toml,*.wasm}");
     const refreshOnChange = () => sidebarProvider?.refresh();
     watcher.onDidChange(refreshOnChange);
     watcher.onDidCreate(refreshOnChange);
     watcher.onDidDelete(refreshOnChange);
 
-    // 10. Subscriptions
+    // 9. Subscriptions
     context.subscriptions.push(
       simulateCommand,
       deployCommand,
