@@ -12,6 +12,7 @@ import {
 } from '../utils/cliErrorParser';
 import * as os from 'os';
 import * as path from 'path';
+import { CliHistoryService } from './cliHistoryService';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -64,19 +65,32 @@ export interface SimulationResult {
 export class SorobanCliService {
     private cliPath: string;
     private source: string;
+    private historyService?: CliHistoryService;
     private customEnv: Record<string, string> = {};
 
-    constructor(cliPath: string, source: string = 'dev') {
+    constructor(
+        cliPath: string,
+        source: string = 'dev',
+        historyService?: CliHistoryService
+    ) {
         this.cliPath = cliPath;
         this.source = source;
+        this.historyService = historyService;
     }
 
     async simulateTransaction(
         contractId: string,
         functionName: string,
         args: any[],
-        network: string = 'testnet'
+        network: string = 'testnet',
+        historySource: 'manual' | 'replay' | null = 'manual'
     ): Promise<SimulationResult> {
+        const startTime = Date.now();
+        let stdoutText = '';
+        let stderrText = '';
+        let exitCode = 0;
+        let success = false;
+
         try {
             const commandParts = [
                 this.cliPath,
@@ -126,6 +140,21 @@ export class SorobanCliService {
                     maxBuffer: 10 * 1024 * 1024, // 10MB buffer
                     timeout: 30000 // 30 second timeout
                 }
+            );
+
+            stdoutText = stdout;
+            stderrText = stderr;
+            success = true;
+
+            await this.recordExecution(
+                commandParts[0],
+                commandParts.slice(1),
+                true,
+                0,
+                stdoutText,
+                stderrText,
+                Date.now() - startTime,
+                historySource
             );
 
             if (stderr && stderr.trim().length > 0) {
@@ -199,8 +228,11 @@ export class SorobanCliService {
                 network,
             };
 
-            const stderrText = this.getExecErrorStream(error, 'stderr');
-            const stdoutText = this.getExecErrorStream(error, 'stdout');
+            stderrText = this.getExecErrorStream(error, 'stderr');
+            stdoutText = this.getExecErrorStream(error, 'stdout');
+            exitCode = (error as any)?.code ?? 1;
+            success = false;
+
             const combined = [stderrText, stdoutText, errorMessage].filter(Boolean).join('\n');
 
             const parsedError = parseCliErrorOutput(combined || errorMessage, cliContext);
@@ -213,8 +245,50 @@ export class SorobanCliService {
                 ];
             }
 
+            await this.recordExecution(
+                this.cliPath,
+                [
+                    'contract', 'invoke',
+                    '--id', contractId,
+                    '--source', this.source,
+                    '--network', network,
+                    '--', functionName,
+                    ...args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a))
+                ],
+                false,
+                exitCode,
+                stdoutText,
+                stderrText,
+                Date.now() - startTime,
+                historySource
+            );
+
             logCliError(parsedError, '[Simulation CLI]');
             return this.toSimulationError(parsedError);
+        }
+    }
+
+    private async recordExecution(
+        command: string,
+        args: string[],
+        success: boolean,
+        exitCode: number,
+        stdout: string,
+        stderr: string,
+        durationMs: number,
+        source: 'manual' | 'replay' | null
+    ): Promise<void> {
+        if (this.historyService && source) {
+            await this.historyService.recordCommand({
+                command,
+                args,
+                outcome: success ? 'success' : 'failure',
+                exitCode,
+                stdout,
+                stderr,
+                durationMs,
+                source
+            });
         }
     }
 
