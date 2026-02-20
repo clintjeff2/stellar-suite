@@ -38,6 +38,8 @@ import { EnvVariableService } from "./services/envVariableService";
 import { RpcFallbackService } from "./services/rpcFallbackService";
 import { RpcRetryService } from "./services/rpcRetryService";
 import { createCliConfigurationService } from "./services/cliConfigurationVscode";
+import { createCliVersionService } from "./services/cliVersionVscode";
+import { CliVersionService } from "./services/cliVersionService";
 import { CliHistoryService } from "./services/cliHistoryService";
 import { CliReplayService } from "./services/cliReplayService";
 import { StateMigrationService } from "./services/stateMigrationService";
@@ -72,6 +74,7 @@ let resourceProfilingService: ResourceProfilingService | undefined;
 let rpcAuthService: RpcAuthService | undefined;
 let envVariableService: EnvVariableService | undefined;
 let fallbackService: RpcFallbackService | undefined;
+let cliVersionService: CliVersionService | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel("Stellar Suite");
@@ -174,6 +177,11 @@ export function activate(context: vscode.ExtensionContext) {
     registerCliHistoryCommands(context, cliHistoryService, cliReplayService);
     outputChannel.appendLine('[Extension] CLI history and replay initialized');
 
+    // 4.5. CLI Version Detection
+    cliVersionService = createCliVersionService(context, outputChannel);
+    context.subscriptions.push(cliVersionService);
+    outputChannel.appendLine('[Extension] CLI version detection initialized');
+
     // 5. Initialize Resource Profiling and Env Variable services
     resourceProfilingService = new ResourceProfilingService(context, outputChannel);
     registerResourceProfilingCommands(context, resourceProfilingService);
@@ -230,6 +238,13 @@ export function activate(context: vscode.ExtensionContext) {
         sidebarProvider
       )
     );
+
+    // Wire CLI version warnings to sidebar
+    if (cliVersionService && sidebarProvider) {
+      cliVersionService.onWarning((result) => {
+        sidebarProvider?.postCliVersionWarning(result);
+      });
+    }
 
     simulationReplayService = new SimulationReplayService(
       simulationHistoryService!,
@@ -296,6 +311,29 @@ export function activate(context: vscode.ExtensionContext) {
       }
     );
 
+    const checkCliVersionCommand = vscode.commands.registerCommand(
+      "stellarSuite.checkCliVersion",
+      async () => {
+        if (!cliVersionService) { return; }
+        const cliPath = vscode.workspace.getConfiguration('stellarSuite').get<string>('cliPath', 'stellar');
+        cliVersionService.clearCache();
+        const result = await cliVersionService.checkVersion(cliPath);
+        if (result) {
+          if (result.compatible) {
+            vscode.window.showInformationMessage(result.message);
+          } else {
+            const action = result.upgradeCommand ? await vscode.window.showWarningMessage(result.message, 'Copy Upgrade Command') : undefined;
+            if (action === 'Copy Upgrade Command' && result.upgradeCommand) {
+              await vscode.env.clipboard.writeText(result.upgradeCommand);
+              vscode.window.showInformationMessage('Upgrade command copied to clipboard.');
+            }
+          }
+        } else {
+          vscode.window.showInformationMessage('CLI version check is disabled.');
+        }
+      }
+    );
+
     registerSimulationHistoryCommands(context, simulationHistoryService!);
     registerReplayCommands(context, simulationHistoryService!, simulationReplayService!, sidebarProvider, fallbackService);
     registerHealthCommands(context, healthMonitor!);
@@ -334,6 +372,7 @@ export function activate(context: vscode.ExtensionContext) {
       copyContractIdCommand,
       showVersionMismatchesCommand,
       showCompilationStatusCommand,
+      checkCliVersionCommand,
       deployFromSidebarCommand,
       simulateFromSidebarCommand,
       watcher,

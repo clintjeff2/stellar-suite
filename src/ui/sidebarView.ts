@@ -635,6 +635,10 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         return this.versionTracker;
     }
 
+    public postCliVersionWarning(data: { compatible: boolean; currentVersion: string; requiredVersion: string; message: string; upgradeCommand?: string }) {
+        this._view?.webview.postMessage({ type: 'cli:versionWarning', data });
+    }
+
     public showDeploymentResult(deploymentInfo: unknown) {
         this.outputChannel.appendLine(`[Sidebar] Deployment result: ${JSON.stringify(deploymentInfo)} `);
         this.refresh();
@@ -1279,6 +1283,25 @@ body {
     color: var(--color - danger);
     margin - bottom: 8px;
 }
+.cli - version - warning {
+    background: rgba(255, 167, 38, .1);
+    border: 1px solid rgba(255, 167, 38, .4);
+    border - radius: var(--radius);
+    padding: 6px 10px;
+    font - size: 11px;
+    color: var(--color - warning, #ffa726);
+    margin - bottom: 8px;
+}
+.cli - version - warning .dismiss - btn {
+    background: none;
+    border: none;
+    color: var(--color - warning, #ffa726);
+    cursor: pointer;
+    float: right;
+    font - size: 13px;
+    padding: 0;
+    line - height: 1;
+}
 
 /* ── Deployments ────────────────────────────────────────── */
 #deployments - list { padding: 0 8px 16px; }
@@ -1616,6 +1639,9 @@ window.addEventListener('message', (event) => {
                     el.classList.toggle('visible', _showShortcutHints);
                 });
             }
+            break;
+        case 'cli:versionWarning':
+            renderCliVersionWarning(msg.data);
             break;
     }
 });
@@ -2379,6 +2405,27 @@ function renderVersionMismatches(states) {
     banner.style.cssText = 'margin: 0 8px 8px;';
     banner.innerHTML = \`⚠ <strong>\${mismatches.length} version mismatch(es) detected.</strong>\` +
         mismatches.map(m => \`<div style="margin-top:4px">\${esc(m.contractName)}: local <strong>\${esc(m.localVersion)}</strong> vs deployed <strong>\${esc(m.deployedVersion)}</strong></div>\`).join('');
+    const contractsList = document.getElementById('contracts-list');
+    contractsList?.parentNode?.insertBefore(banner, contractsList);
+}
+
+// ── CLI version warning banner ────────────────────────────────
+
+function renderCliVersionWarning(data) {
+    const existing = document.getElementById('cli-version-warning');
+    if (existing) { existing.remove(); }
+    if (!data || data.compatible) { return; }
+    const banner = document.createElement('div');
+    banner.id        = 'cli-version-warning';
+    banner.className = 'cli-version-warning';
+    banner.style.cssText = 'margin: 0 8px 8px;';
+    const dismissBtn = '<button class="dismiss-btn" onclick="document.getElementById(\'cli-version-warning\').remove()">✕</button>';
+    const upgradeHint = data.upgradeCommand
+        ? '<div style="margin-top:4px;font-size:10px;opacity:.8">Upgrade: <code>' + esc(data.upgradeCommand) + '</code></div>'
+        : '';
+    banner.innerHTML = dismissBtn +
+        '⚠ <strong>CLI Version Warning</strong><div style="margin-top:4px">' +
+        esc(data.message) + '</div>' + upgradeHint;
     const contractsList = document.getElementById('contracts-list');
     contractsList?.parentNode?.insertBefore(banner, contractsList);
 }
