@@ -2,9 +2,14 @@ import * as vscode from 'vscode';
 import { simulateTransaction } from './commands/simulateTransaction';
 import { deployContract } from './commands/deployContract';
 import { buildContract } from './commands/buildContract';
+import { registerHealthCommands } from './commands/healthCommands';
 import { SidebarViewProvider } from './ui/sidebarView';
+import { RpcHealthMonitor } from './services/rpcHealthMonitor';
+import { RpcHealthStatusBar } from './ui/rpcHealthStatusBar';
 
 let sidebarProvider: SidebarViewProvider | undefined;
+let healthMonitor: RpcHealthMonitor | undefined;
+let healthStatusBar: RpcHealthStatusBar | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     const outputChannel = vscode.window.createOutputChannel('Stellar Suite');
@@ -12,6 +17,15 @@ export function activate(context: vscode.ExtensionContext) {
     console.log('[Stellar Suite] Extension activating...');
 
     try {
+        // Initialize RPC health monitoring
+        healthMonitor = new RpcHealthMonitor(context, { enableLogging: false });
+        const rpcUrl = vscode.workspace.getConfiguration('stellarSuite').get<string>('rpcUrl', 'http://localhost:8000');
+        healthMonitor.addEndpoint(rpcUrl, 0, false);
+        healthMonitor.startMonitoring();
+        
+        healthStatusBar = new RpcHealthStatusBar(healthMonitor);
+        outputChannel.appendLine('[Extension] RPC health monitor initialized');
+
         sidebarProvider = new SidebarViewProvider(context.extensionUri, context);
         context.subscriptions.push(
             vscode.window.registerWebviewViewProvider(SidebarViewProvider.viewType, sidebarProvider)
@@ -65,6 +79,12 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
+    // Register health monitoring commands
+    if (healthMonitor) {
+        registerHealthCommands(context, healthMonitor);
+        outputChannel.appendLine('[Extension] RPC health commands registered');
+    }
+
     outputChannel.appendLine('[Extension] All commands registered');
     console.log('[Stellar Suite] All commands registered');
 
@@ -98,7 +118,9 @@ export function activate(context: vscode.ExtensionContext) {
         deployFromSidebarCommand,
         simulateFromSidebarCommand,
         buildCommand,
-        watcher
+        watcher,
+        healthStatusBar || { dispose: () => {} },
+        healthMonitor || { dispose: () => {} }
     );
 
     outputChannel.appendLine('[Extension] Extension activation complete');
@@ -115,4 +137,6 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    healthMonitor?.dispose();
+    healthStatusBar?.dispose();
 }
