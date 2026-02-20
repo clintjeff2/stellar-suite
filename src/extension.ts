@@ -148,7 +148,6 @@ export function activate(context: vscode.ExtensionContext) {
             simulateFromSidebarCommand,
             copyContractIdCommand,
             showVersionMismatchesCommand,
-            watcher
             watcher,
             syncStatusProvider || { dispose: () => {} }
         );
