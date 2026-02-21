@@ -83,6 +83,12 @@ export interface ToastQueueConfig {
     position: ToastPosition;
     /** Enable animations */
     enableAnimations: boolean;
+    /** Master switch: when false, no toasts are shown */
+    enabled?: boolean;
+    /** Per-type enable (when omitted, all types are enabled) */
+    enabledTypes?: Record<ToastType, boolean>;
+    /** When false, action buttons are not shown */
+    actionsEnabled?: boolean;
 }
 
 /**

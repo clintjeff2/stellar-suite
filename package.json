@@ -231,6 +231,10 @@
       {
         "command": "stellarSuite.checkCliVersion",
         "title": "Stellar Suite: Check CLI Version"
+      },
+      {
+        "command": "stellarSuite.openNotificationPreferences",
+        "title": "Stellar Suite: Open Notification Preferences"
       }
     ],
     "menus": {
@@ -418,6 +422,53 @@
           "default": 60000,
           "minimum": 5000,
           "description": "Per-attempt timeout in milliseconds. Timed-out attempts are retried if attempts remain."
+        },
+        "stellarSuite.notifications.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable toast notifications."
+        },
+        "stellarSuite.notifications.maxVisible": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum number of visible toast notifications at once."
+        },
+        "stellarSuite.notifications.maxQueued": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of notifications in the queue."
+        },
+        "stellarSuite.notifications.defaultDuration": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 0,
+          "maximum": 300000,
+          "description": "Default notification duration in milliseconds (0 = no auto-dismiss)."
+        },
+        "stellarSuite.notifications.position": {
+          "type": "string",
+          "enum": ["top-right", "top-left", "bottom-right", "bottom-left", "top-center", "bottom-center"],
+          "default": "bottom-right",
+          "description": "Position of toast notifications on screen."
+        },
+        "stellarSuite.notifications.enableAnimations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable animations for toast notifications."
+        },
+        "stellarSuite.notifications.soundEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Play sound when a notification is shown (reserved for future use)."
+        },
+        "stellarSuite.notifications.actionsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show action buttons on notifications when available."
         }
       }
     }
@@ -427,7 +478,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "test": "npm run test:cli-history && npm run test:cli-errors && npm run test:cli-streaming && npm run test:version-tracker && npm run test:state-validation && npm run test:cargo-metadata && npm run test:state-diff && npm run test:simulation-history && npm run test:cli-validation && npm run test:compilation-status && npm run test:state-backup && npm run test:sidebar-export-import && npm run test:simulation-replay && npm run test:transaction-signing && npm run test:keypair-management && npm run test:resource-profiling && npm run test:env-variable && npm run test:template-detection && npm run test:simulation-validation && npm run test:rpc-auth && npm run test:rpc-rate-limit && npm run test:rpc-service && npm run test:rpc-retry-service && npm run test:keyboard-shortcuts && npm run test:simulation-comparison && npm run test:simulation-diff && npm run test:progress-indicators && npm run test:contract-deployer && npm run test:deployment-workflow-integration && npm run test:toast-notification && npm run test:cli-version && npm run test:form-generator && npm run test:form-validator",
+    "test": "npm run test:cli-history && npm run test:cli-errors && npm run test:cli-streaming && npm run test:version-tracker && npm run test:state-validation && npm run test:cargo-metadata && npm run test:state-diff && npm run test:simulation-history && npm run test:cli-validation && npm run test:compilation-status && npm run test:state-backup && npm run test:sidebar-export-import && npm run test:simulation-replay && npm run test:transaction-signing && npm run test:keypair-management && npm run test:resource-profiling && npm run test:env-variable && npm run test:template-detection && npm run test:simulation-validation && npm run test:rpc-auth && npm run test:rpc-rate-limit && npm run test:rpc-service && npm run test:rpc-retry-service && npm run test:keyboard-shortcuts && npm run test:simulation-comparison && npm run test:simulation-diff && npm run test:progress-indicators && npm run test:contract-deployer && npm run test:deployment-workflow-integration && npm run test:toast-notification && npm run test:notification-preferences && npm run test:cli-version && npm run test:form-generator && npm run test:form-validator",
     "test:contract-deployer": "tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/services/contractDeployer.ts src/test/mocks/mockCliOutputStreamingService.ts src/test/fixtures/deploymentFixtures.ts src/test/contractDeployer.test.ts && node out-test/test/contractDeployer.test.js",
     "test:deployment-workflow-integration": "tsc --module commonjs --target ES2020 --lib ES2020,DOM --types node --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/services/cliCancellation.ts src/services/cliTimeoutService.ts src/utils/streamBuffer.ts src/utils/cliCleanupUtilities.ts src/ui/timeoutIndicators.ts src/services/cliOutputStreamingService.ts src/services/cliConfigurationService.ts src/services/deploymentRetryService.ts src/services/contractDeployer.ts src/test/mocks/mockCliOutputStreamingService.ts src/test/fixtures/deploymentFixtures.ts src/test/fixtures/deploymentWorkflowFixtures.ts src/test/deploymentWorkflow.integration.test.ts && node out-test/test/deploymentWorkflow.integration.test.js",
 
@@ -463,6 +514,7 @@
     "test:success-notification": "tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/types/successNotification.ts src/services/successNotificationService.ts src/test/successNotification.test.ts && node out-test/test/successNotification.test.js",
     "test:progress-indicators": "tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/services/progressIndicatorService.ts src/test/progressIndicatorService.test.ts && node out-test/test/progressIndicatorService.test.js",
     "test:toast-notification": "node scripts/setup-vscode-mock.js && tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/types/toastNotification.ts src/services/toastNotificationService.ts src/test/toastNotification.test.ts && node out-test/test/toastNotification.test.js",
+    "test:notification-preferences": "tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/types/toastNotification.ts src/types/notificationPreferences.ts src/services/notificationPreferencesService.ts src/test/notificationPreferences.test.ts && node out-test/test/notificationPreferences.test.js",
     "test:rpc-service": "node scripts/setup-vscode-mock.js && tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/utils/cliErrorParser.ts src/utils/errorFormatter.ts src/types/simulationState.ts src/types/rpcRateLimit.ts src/services/rpcRateLimitService.ts src/services/rpcService.ts src/test/mocks/mockRpcServer.ts src/test/rpcService.test.ts && node out-test/test/rpcService.test.js",
     "test:rpc-retry-service": "node scripts/setup-vscode-mock.js && tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/services/circuitBreaker.ts src/services/rpcRetryService.ts src/test/rpcRetryService.test.ts && node out-test/test/rpcRetryService.test.js",
     "test:cli-version": "tsc --module commonjs --target ES2020 --lib ES2020,DOM --esModuleInterop --skipLibCheck --rootDir src --outDir out-test src/utils/versionParser.ts src/types/cliVersion.ts src/services/cliVersionService.ts src/test/cliVersion.test.ts && node out-test/test/cliVersion.test.js",

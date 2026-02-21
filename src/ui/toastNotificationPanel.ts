@@ -193,6 +193,10 @@ export class ToastNotificationPanel {
                 kind: vscode.QuickPickItemKind.Separator
             },
             {
+                label: '$(settings-gear) Notification Preferences',
+                description: 'Customize notification behavior and presets'
+            },
+            {
                 label: '$(clear-all) Clear Statistics',
                 description: 'Reset notification statistics'
             },
@@ -216,6 +220,10 @@ export class ToastNotificationPanel {
         }
 
         // Handle action selections
+        if (selection.label === '$(settings-gear) Notification Preferences') {
+            await vscode.commands.executeCommand('stellarSuite.openNotificationPreferences');
+            return;
+        }
         if (selection.label === '$(clear-all) Clear Statistics') {
             const confirm = await vscode.window.showWarningMessage(
                 'Clear all notification statistics?',

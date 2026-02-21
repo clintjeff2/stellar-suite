@@ -61,6 +61,13 @@ export class ToastNotificationService implements IToastNotificationService {
     }
 
     /**
+     * Update queue/config at runtime (e.g. when user changes notification preferences).
+     */
+    updateConfig(config: Partial<ToastQueueConfig>): void {
+        this.config = { ...this.config, ...config };
+    }
+
+    /**
      * Show a success notification
      */
     async success(message: string, options?: Partial<ToastOptions>): Promise<string> {
@@ -110,6 +117,14 @@ export class ToastNotificationService implements IToastNotificationService {
      * Show a custom notification
      */
     async show(options: ToastOptions): Promise<string> {
+        if (this.config.enabled === false) {
+            return options.id || `toast-${this.nextId++}`;
+        }
+        const enabledTypes = this.config.enabledTypes;
+        if (enabledTypes && enabledTypes[options.type] === false) {
+            return options.id || `toast-${this.nextId++}`;
+        }
+
         // Generate unique ID if not provided
         const id = options.id || `toast-${this.nextId++}`;
 
@@ -330,7 +345,10 @@ export class ToastNotificationService implements IToastNotificationService {
      */
     private async showNativeNotification(toast: Toast): Promise<void> {
         const message = toast.message;
-        const actions = (toast.actions || []).map(action => action.label);
+        const actions =
+            this.config.actionsEnabled !== false && toast.actions
+                ? toast.actions.map(action => action.label)
+                : [];
 
         let selectedAction: string | undefined;
 
