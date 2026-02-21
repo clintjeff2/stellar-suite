@@ -8,8 +8,16 @@ import { SidebarViewProvider } from '../ui/sidebarView';
 import { formatError } from '../utils/errorFormatter';
 import { resolveCliConfigurationForCommand } from '../services/cliConfigurationVscode';
 import { SimulationCacheService } from '../services/simulationCacheService';
+import { SimulationValidationService } from '../services/simulationValidationService';
+import { ContractWorkspaceStateService } from '../services/contractWorkStateService';
+import { InputSanitizationService } from '../services/inputSanitizationService';
+import { parseParameters } from '../utils/abiParser';
+import { AbiFormGeneratorService } from '../services/abiFormGeneratorService';
+import { FormValidationService } from '../services/formValidationService';
+import { ContractFormPanel } from '../ui/contractFormPanel';
 
 export async function simulateTransaction(context: vscode.ExtensionContext, sidebarProvider?: SidebarViewProvider) {
+    const sanitizer = new InputSanitizationService();
     try {
         const resolvedCliConfig = await resolveCliConfigurationForCommand(context);
         if (!resolvedCliConfig.validation.valid) {
@@ -26,6 +34,10 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
         const rpcUrl = resolvedCliConfig.configuration.rpcUrl;
 
         const lastContractId = context.workspaceState.get<string>('lastContractId');
+        
+        const workspaceStateService = new ContractWorkspaceStateService(context, { appendLine: () => {} });
+        await workspaceStateService.initialize();
+        const lastContractId = context.workspaceState.get<string>('stellarSuite.lastContractId') ?? '';
 
         let defaultContractId = lastContractId || '';
         try {
@@ -39,23 +51,20 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
             // ignore
         }
 
-        const contractId = await vscode.window.showInputBox({
+        const rawContractId = await vscode.window.showInputBox({
             prompt: 'Enter the contract ID (address)',
             placeHolder: defaultContractId || 'e.g., C...',
             value: defaultContractId,
             validateInput: (value: string) => {
-                if (!value || value.trim().length === 0) {
-                    return 'Contract ID is required';
-                }
-                // Basic validation for Stellar contract ID format
-                if (!value.match(/^C[A-Z0-9]{55}$/)) {
-                    return 'Invalid contract ID format (should start with C and be 56 characters)';
+                const result = sanitizer.sanitizeContractId(value, { field: 'contractId' });
+                if (!result.valid) {
+                    return result.errors[0];
                 }
                 return null;
             }
         });
 
-        if (!contractId) {
+        if (rawContractId === undefined) {
             return; // User cancelled
         }
 
@@ -73,7 +82,12 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
                 // If inspection fails, continue with manual input
                 console.log('Contract inspection failed, using manual input');
             }
+        const contractIdResult = sanitizer.sanitizeContractId(rawContractId, { field: 'contractId' });
+        if (!contractIdResult.valid) {
+            vscode.window.showErrorMessage(`Invalid contract ID: ${contractIdResult.errors[0]}`);
+            return;
         }
+        const contractId = contractIdResult.sanitizedValue;
 
         // If we have functions, show a picker
         if (contractFunctions.length > 0) {
@@ -92,34 +106,31 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
             if (!selected) {
                 return; // User cancelled
             }
+        await context.workspaceState.update('stellarSuite.lastContractId', contractId);
 
-            selectedFunction = contractFunctions.find(f => f.name === selected.label) || null;
-            functionName = selected.label;
-        } else {
-            // Fallback to manual input
-            const input = await vscode.window.showInputBox({
-                prompt: 'Enter the function name to call',
-                placeHolder: 'e.g., hello',
-                validateInput: (value: string) => {
-                    if (!value || value.trim().length === 0) {
-                        return 'Function name is required';
-                    }
-                    return null;
+        // Get the function name to call
+        const rawFunctionName = await vscode.window.showInputBox({
+            prompt: 'Enter the function name to simulate',
+            placeHolder: 'e.g., transfer',
+            validateInput: (value: string) => {
+                const result = sanitizer.sanitizeFunctionName(value, { field: 'functionName' });
+                if (!result.valid) {
+                    return result.errors[0];
                 }
-            });
-
-            if (!input) {
-                return; // User cancelled
+                return null;
             }
+        });
 
-            functionName = input;
-
-            // Try to get function help
-            if (useLocalCli) {
-                const inspector = new ContractInspector(cliPath, source);
-                selectedFunction = await inspector.getFunctionHelp(contractId, functionName);
-            }
+        if (rawFunctionName === undefined) {
+            return; // User cancelled
         }
+
+        const functionNameResult = sanitizer.sanitizeFunctionName(rawFunctionName, { field: 'functionName' });
+        if (!functionNameResult.valid) {
+            vscode.window.showErrorMessage(`Invalid function name: ${functionNameResult.errors[0]}`);
+            return;
+        }
+        const functionName = functionNameResult.sanitizedValue;
 
         // Collect function arguments based on parameters
         let args: any[] = [];
@@ -140,19 +151,29 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
                         return null;
                     }
                 });
+        // Get function info to build typed form fields
+        const inspector = new ContractInspector(useLocalCli ? cliPath : rpcUrl, source);
+        const contractFunctions = await inspector.getContractFunctions(contractId);
+        const selectedFunction = contractFunctions.find(f => f.name === functionName);
 
-                if (param.required && paramValue === undefined) {
-                    return; // User cancelled required parameter
-                }
+        // Parse ABI parameters and open dynamic form
+        const abiParams = parseParameters(selectedFunction?.parameters ?? []);
+        const generatedForm = new AbiFormGeneratorService().generateForm(
+            contractId,
+            { name: functionName, parameters: selectedFunction?.parameters ?? [] },
+            abiParams
+        );
+        const formPanel = ContractFormPanel.createOrShow(context, generatedForm);
+        const formValidator = new FormValidationService();
 
-                if (paramValue !== undefined && paramValue.trim().length > 0) {
-                    // Try to parse as JSON, otherwise use as string
-                    try {
-                        argsObj[param.name] = JSON.parse(paramValue);
-                    } catch {
-                        argsObj[param.name] = paramValue;
-                    }
-                }
+        let sanitizedArgs: Record<string, unknown> | null = null;
+
+        // Validation loop — panel stays open until valid data is submitted or user cancels
+        while (sanitizedArgs === null) {
+            const formData = await formPanel.waitForSubmit();
+
+            if (formData === null) {
+                return; // User cancelled or closed the panel
             }
 
             // Convert to array format expected by services
@@ -167,18 +188,75 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
 
             if (argsInput === undefined) {
                 return; // User cancelled
+            const vr = formValidator.validate(formData, abiParams, sanitizer);
+
+            if (!vr.valid) {
+                formPanel.showErrors(vr.errors);
+                continue; // Wait for the next submission attempt
             }
 
-            try {
-                const parsed = JSON.parse(argsInput || '{}');
-                if (typeof parsed === 'object' && !Array.isArray(parsed) && parsed !== null) {
-                    args = [parsed];
-                } else {
-                    vscode.window.showErrorMessage('Arguments must be a JSON object');
-                    return;
-                }
-            } catch (error) {
-                vscode.window.showErrorMessage(`Invalid JSON: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            if (Object.keys(vr.warnings).length > 0) {
+                formPanel.showWarnings(vr.warnings);
+            }
+
+            sanitizedArgs = vr.sanitizedArgs;
+        }
+
+        const args: any[] = [sanitizedArgs];
+
+        // Validate simulation input and predict possible failures before execution
+        const validationService = new SimulationValidationService();
+        const validationReport = validationService.validateSimulation(
+            contractId,
+            functionName,
+            args,
+            selectedFunction ?? null,
+            contractFunctions
+        );
+
+        const validationWarnings = [
+            ...validationReport.warnings,
+            ...validationReport.predictedErrors
+                .filter(prediction => prediction.severity === 'warning')
+                .map(prediction => `${prediction.code}: ${prediction.message}`),
+        ];
+
+        if (!validationReport.valid) {
+            const validationErrorMessage = [
+                ...validationReport.errors,
+                ...(validationReport.suggestions.length > 0
+                    ? ['Suggestions:', ...validationReport.suggestions.map(suggestion => `- ${suggestion}`)]
+                    : []),
+            ].join('\n');
+
+            const panel = SimulationPanel.createOrShow(context);
+            panel.updateResults(
+                {
+                    success: false,
+                    error: `Simulation validation failed before execution.\n\n${validationErrorMessage}`,
+                    errorSummary: validationReport.errors[0],
+                    errorSuggestions: validationReport.suggestions,
+                    validationWarnings,
+                },
+                contractId,
+                functionName,
+                args
+            );
+
+            vscode.window.showErrorMessage(`Simulation validation failed: ${validationReport.errors[0]}`);
+            return;
+        }
+
+        if (validationWarnings.length > 0) {
+            const firstWarning = validationWarnings[0];
+            const selection = await vscode.window.showWarningMessage(
+                `Simulation pre-check warning: ${firstWarning}`,
+                'Continue',
+                'Cancel'
+            );
+
+            if (selection !== 'Continue') {
+                vscode.window.showInformationMessage('Simulation cancelled due to validation warning.');
                 return;
             }
         }
@@ -187,6 +265,7 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
         const panel = SimulationPanel.createOrShow(context);
         panel.updateResults(
             { success: false, error: 'Running simulation...' } as any,
+            { success: false, error: 'Running simulation...', validationWarnings },
             contractId,
             functionName,
             args
@@ -254,6 +333,12 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
                     if (!cliAvailable) {
                         const foundPath = await SorobanCliService.findCliPath();
                         const suggestion = foundPath
+let actualCliPath = cliPath;
+let cliService = new SorobanCliService(actualCliPath, source);
+
+if (!await cliService.isAvailable()) {
+    const foundPath = await SorobanCliService.findCliPath();
+                        const suggestion = foundPath 
                             ? `\n\nFound Stellar CLI at: ${foundPath}\nUpdate your stellarSuite.cliPath setting to: "${foundPath}"`
                             : '\n\nCommon locations:\n- ~/.cargo/bin/stellar\n- /usr/local/bin/stellar\n\nOr install Stellar CLI: https://developers.stellar.org/docs/tools/cli';
 
@@ -310,7 +395,7 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
                 progress.report({ increment: 100, message: 'Complete' });
 
                 // Update panel with results
-                panel.updateResults(result, contractId, functionName, args);
+                panel.updateResults({ ...result, validationWarnings }, contractId, functionName, args);
 
                 // Update sidebar view
                 if (sidebarProvider) {

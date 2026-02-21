@@ -5,10 +5,11 @@ import {
     CliConfigurationStore,
     DEFAULT_CLI_CONFIGURATION,
     ResolvedCliConfiguration,
+    RpcEndpoint,
 } from './cliConfigurationService';
 
 class WorkspaceStateCliConfigurationStore implements CliConfigurationStore {
-    constructor(private readonly state: vscode.Memento) {}
+    constructor(private readonly state: vscode.Memento) { }
 
     get<T>(key: string, defaultValue: T): T {
         return this.state.get<T>(key, defaultValue);
@@ -26,6 +27,8 @@ export function readWorkspaceCliConfiguration(): CliConfiguration {
         source: config.get<string>('source', DEFAULT_CLI_CONFIGURATION.source),
         network: config.get<string>('network', DEFAULT_CLI_CONFIGURATION.network) || DEFAULT_CLI_CONFIGURATION.network,
         rpcUrl: config.get<string>('rpcUrl', DEFAULT_CLI_CONFIGURATION.rpcUrl),
+        rpcEndpoints: config.get<any[]>('rpcEndpoints', DEFAULT_CLI_CONFIGURATION.rpcEndpoints) || DEFAULT_CLI_CONFIGURATION.rpcEndpoints,
+        automaticFailover: config.get<boolean>('automaticFailover', DEFAULT_CLI_CONFIGURATION.automaticFailover) ?? DEFAULT_CLI_CONFIGURATION.automaticFailover,
         useLocalCli: config.get<boolean>('useLocalCli', DEFAULT_CLI_CONFIGURATION.useLocalCli),
     };
 }
@@ -39,7 +42,11 @@ export async function writeWorkspaceCliConfiguration(
     await config.update('source', configuration.source, target);
     await config.update('network', configuration.network, target);
     await config.update('rpcUrl', configuration.rpcUrl, target);
+    await config.update('rpcEndpoints', configuration.rpcEndpoints, target);
+    await config.update('automaticFailover', configuration.automaticFailover, target);
     await config.update('useLocalCli', configuration.useLocalCli, target);
+    await config.update('rpcEndpoints', configuration.rpcEndpoints, target);
+    await config.update('automaticFailover', configuration.automaticFailover, target);
 }
 
 export function createCliConfigurationService(context: vscode.ExtensionContext): CliConfigurationService {

@@ -6,8 +6,43 @@ import { SidebarViewProvider } from '../ui/sidebarView';
 import * as path from 'path';
 import { resolveCliConfigurationForCommand } from '../services/cliConfigurationVscode';
 import { SimulationCacheService } from '../services/simulationCacheService';
+import { DeploymentSigningWorkflowService } from '../services/deploymentSigningWorkflowService';
+import {
+    DeploymentSigningMethod,
+    DeploymentSigningResult,
+} from '../services/transactionSigningService';
+import { ProgressIndicatorService } from '../services/progressIndicatorService';
+import { formatProgressMessage, OperationProgressStatusBar } from '../ui/progressComponents';
+
+function reportNotificationProgress(
+    progress: vscode.Progress<{ message?: string; increment?: number }>,
+    percentage: number | undefined,
+    message: string,
+    lastPercentage: { value: number }
+): void {
+    if (typeof percentage === 'number') {
+        const next = Math.max(lastPercentage.value, Math.round(percentage));
+        const increment = next - lastPercentage.value;
+        if (increment > 0) {
+            progress.report({ increment, message });
+            lastPercentage.value = next;
+            return;
+        }
+    }
+
+    progress.report({ message });
+}
 
 export async function deployContract(context: vscode.ExtensionContext, sidebarProvider?: SidebarViewProvider) {
+    const progressService = new ProgressIndicatorService();
+    const operation = progressService.createOperation({
+        id: `deploy-${Date.now()}`,
+        title: 'Deploy Contract',
+        cancellable: true,
+    });
+    const statusBar = new OperationProgressStatusBar();
+    statusBar.bind(operation);
+
     try {
         const resolvedCliConfig = await resolveCliConfigurationForCommand(context);
         if (!resolvedCliConfig.validation.valid) {
@@ -36,16 +71,33 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Deploying Contract',
-                cancellable: false
+                cancellable: true
             },
-            async (progress: vscode.Progress<{ message?: string; increment?: number }>) => {
-                progress.report({ increment: 0, message: 'Detecting contract...' });
+            async (
+                progress: vscode.Progress<{ message?: string; increment?: number }>,
+                token: vscode.CancellationToken
+            ) => {
+                operation.start('Preparing deployment...');
+                operation.bindCancellationToken(token);
+
+                const lastPercentage = { value: 0 };
+                const progressSubscription = operation.onUpdate((snapshot) => {
+                    reportNotificationProgress(
+                        progress,
+                        snapshot.percentage,
+                        formatProgressMessage(snapshot),
+                        lastPercentage
+                    );
+                });
+
+                try {
+                    operation.setIndeterminate('Detecting contract...');
 
                 let contractDir: string | null = null;
                 let wasmPath: string | null = null;
                 let deployFromWasm = false;
 
-                progress.report({ increment: 10, message: 'Searching workspace...' });
+                operation.report({ percentage: 10, message: 'Searching workspace...' });
                 if (selectedContractPath) {
                     const fs = require('fs');
                     if (fs.existsSync(selectedContractPath)) {
@@ -130,6 +182,21 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                                     }
                                 );
 
+
+                        if (contractDir) {
+                            const expectedWasm = WasmDetector.getExpectedWasmPath(contractDir);
+                            const fs = require('fs');
+                            if (expectedWasm && fs.existsSync(expectedWasm)) {
+                                const useExisting = await vscode.window.showQuickPick(
+                                    [
+                                        { label: 'Deploy existing WASM', value: 'wasm', detail: expectedWasm },
+                                        { label: 'Build and deploy', value: 'build' }
+                                    ],
+                                    {
+                                        placeHolder: 'WASM file found. Deploy existing or build first?'
+                                    }
+                                );
+
                                 if (!useExisting) {
                                     return;
                                 }
@@ -153,6 +220,12 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                                     mtime: fs.statSync(file).mtime.getTime()
                                 }))
                                 .sort((a, b) => b.mtime - a.mtime);
+                            // Multiple WASM files - show picker sorted by modification time
+                            const fs = require('fs');
+                            const wasmWithStats = wasmFiles.map(file => ({
+                                path: file,
+                                mtime: fs.statSync(file).mtime.getTime()
+                            })).sort((a, b) => b.mtime - a.mtime);
 
                             const selected = await vscode.window.showQuickPick(
                                 wasmWithStats.map(({ path: filePath }) => ({
@@ -233,8 +306,14 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
 
                 // Create deployer
                 const deployer = new ContractDeployer(cliPath, source, network);
+                const signingWorkflow = new DeploymentSigningWorkflowService(context, outputChannel);
+                const signingConfig = vscode.workspace.getConfiguration('stellarSuite.signing');
 
                 let result: any;
+                let result;
+                let signingResult: DeploymentSigningResult | undefined;
+                let deployableWasmPath: string | undefined = wasmPath || undefined;
+                let resolvedContractDir = contractDir || undefined;
                 let contractRootDir: string | undefined;
                 let contractNameForRecord: string | undefined;
 
@@ -245,6 +324,10 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                     result = await deployer.deployFromWasm(wasmPath);
 
                     // Best-effort: walk up from the WASM to find a Cargo.toml.
+                    // Deploy directly from provided WASM (no build)
+                    contractRootDir = path.dirname(wasmPath);
+
+                    // Best-effort: walk up to find Cargo.toml
                     try {
                         const fs = require('fs');
                         let dir = path.dirname(wasmPath);
@@ -256,14 +339,15 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                             }
                             const parent = path.dirname(dir);
                             if (parent === dir) { break; }
+                            if (parent === dir) break;
                             dir = parent;
                         }
                     } catch {
                         // ignore
                     }
                 } else if (contractDir) {
-                    // Build and deploy
-                    progress.report({ increment: 10, message: 'Building contract...' });
+                    // Build first so signing targets actual WASM
+                    operation.report({ percentage: 20, message: 'Building contract...' });
                     outputChannel.appendLine(`\nBuilding contract in: ${contractDir}`);
                     outputChannel.appendLine('Running: stellar contract build\n');
 
@@ -274,13 +358,141 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                         outputChannel.appendLine('=== Build Output ===');
                         outputChannel.appendLine(result.buildOutput);
                         outputChannel.appendLine('');
+                    const buildResult = await deployer.buildContract(contractDir, {
+                        cancellationToken: token,
+                        onStdout: (chunk) => {
+                            outputChannel.append(chunk);
+                            operation.report({
+                                percentage: 45,
+                                message: 'Building contract...',
+                                details: chunk.trim().slice(0, 120),
+                            });
+                        },
+                        onStderr: (chunk) => {
+                            outputChannel.append(chunk);
+                            operation.report({
+                                percentage: 45,
+                                message: 'Building contract...',
+                                details: chunk.trim().slice(0, 120),
+                            });
+                        },
+                    });
+
+                    if (!buildResult.success) {
+                        result = {
+                            success: false,
+                            error: `Build failed: ${buildResult.output}`,
+                            errorSummary: buildResult.errorSummary,
+                            errorType: buildResult.errorType,
+                            errorCode: buildResult.errorCode,
+                            errorSuggestions: buildResult.errorSuggestions,
+                            rawError: buildResult.rawError,
+                            buildOutput: buildResult.output,
+                        };
+                    } else {
+                        deployableWasmPath = buildResult.wasmPath;
+                        contractRootDir = contractDir;
+
+                        if (buildResult.output) {
+                            outputChannel.appendLine('=== Build Output ===');
+                            outputChannel.appendLine(buildResult.output);
+                            outputChannel.appendLine('');
+                        }
                     }
-                } else {
-                    vscode.window.showErrorMessage('Invalid deployment configuration');
+                }
+
+                if (!result && !deployableWasmPath) {
+                    vscode.window.showErrorMessage('Build succeeded but no WASM output could be located.');
                     return;
                 }
 
-                progress.report({ increment: 90, message: 'Finalizing...' });
+                if (!result && deployableWasmPath) {
+                    if (!resolvedContractDir) {
+                        resolvedContractDir = path.dirname(deployableWasmPath);
+                    }
+                    const signingPayload = await signingWorkflow.getSigningService()
+                        .buildDeploymentSigningPayload({
+                            wasmPath: deployableWasmPath,
+                            contractDir: resolvedContractDir,
+                            cliPath,
+                            network,
+                            source,
+                        });
+
+                    if (token.isCancellationRequested) {
+                        operation.cancel('Deployment cancelled by user');
+                        outputChannel.appendLine('[Deploy] Cancelled before signing.');
+                        return;
+                    }
+
+                    operation.report({ percentage: 60, message: 'Signing deployment transaction...' });
+                    signingResult = await signingWorkflow.run({
+                        payload: signingPayload,
+                        defaultMethod: signingConfig.get<DeploymentSigningMethod>(
+                            'defaultMethod',
+                            'interactive'
+                        ),
+                        requireValidatedSignature: signingConfig.get<boolean>('requireValidatedSignature', true),
+                        enableSecureKeyStorage: signingConfig.get<boolean>('enableSecureKeyStorage', true),
+                    });
+
+                    if (!signingResult) {
+                        outputChannel.appendLine('[Signing] Workflow cancelled by user.');
+                        operation.cancel('Signing workflow cancelled');
+                        return;
+                    }
+                    if (!signingResult.success) {
+                        outputChannel.appendLine(`❌ Signing failed: ${signingResult.error}`);
+                        operation.fail(signingResult.error || 'Signing failed');
+                        vscode.window.showErrorMessage(`Deployment signing failed: ${signingResult.error}`);
+                        return;
+                    }
+
+                    outputChannel.appendLine(
+                        `[Signing] ✅ ${signingResult.method} (${signingResult.status}) ` +
+                        `${signingResult.validated ? 'validated' : 'not validated'}`
+                    );
+                    if (signingResult.publicKey) {
+                        outputChannel.appendLine(`[Signing] Signer: ${signingResult.publicKey}`);
+                    }
+                    outputChannel.appendLine(`[Signing] Payload hash: ${signingResult.payloadHash}`);
+
+                    if (token.isCancellationRequested) {
+                        operation.cancel('Deployment cancelled by user');
+                        outputChannel.appendLine('[Deploy] Cancelled before submission.');
+                        return;
+                    }
+
+                    operation.report({ percentage: 75, message: 'Submitting deployment...' });
+                    outputChannel.appendLine(`\nDeploying contract from: ${deployableWasmPath}`);
+                    result = await deployer.deployFromWasm(deployableWasmPath, {
+                        cancellationToken: token,
+                        onStdout: (chunk) => {
+                            outputChannel.append(chunk);
+                            operation.report({
+                                percentage: 85,
+                                message: 'Submitting deployment...',
+                                details: chunk.trim().slice(0, 120),
+                            });
+                        },
+                        onStderr: (chunk) => {
+                            outputChannel.append(chunk);
+                            operation.report({
+                                percentage: 85,
+                                message: 'Submitting deployment...',
+                                details: chunk.trim().slice(0, 120),
+                            });
+                        },
+                    });
+                    result.signing = signingResult;
+                }
+
+                if (!result) {
+                    vscode.window.showErrorMessage('Deployment did not produce a result.');
+                    return;
+                }
+
+                operation.report({ percentage: 90, message: 'Finalizing deployment...' });
 
                 // Display results
                 outputChannel.appendLine('=== Deployment Result ===');
@@ -292,6 +504,12 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                     }
                     if (result.transactionHash) {
                         outputChannel.appendLine(`Transaction Hash: ${result.transactionHash}`);
+                    }
+                    if (signingResult) {
+                        outputChannel.appendLine(
+                            `Signing: ${signingResult.method} (${signingResult.status}) · ` +
+                            `${signingResult.validated ? 'validated' : 'not validated'}`
+                        );
                     }
 
                     // Store contract ID in workspace state
@@ -313,6 +531,30 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                             }
                         } else if (wasmPath) {
                             contractNameForRecord = path.basename(wasmPath);
+                        const deployedAt = new Date().toISOString();
+
+                        // Best-effort contract name (Cargo.toml name if available, else directory name).
+                        let contractNameForRecord: string;
+                        const effectiveContractDir = contractRootDir || resolvedContractDir;
+
+                        if (effectiveContractDir) {
+                            try {
+                                const fs = require('fs');
+                                const cargoPath = path.join(effectiveContractDir, 'Cargo.toml');
+                                if (fs.existsSync(cargoPath)) {
+                                    const content = fs.readFileSync(cargoPath, 'utf-8');
+                                    const match = content.match(/^\s*name\s*=\s*"([^"]+)"/m);
+                                    contractNameForRecord = match
+                                        ? match[1]
+                                        : path.basename(effectiveContractDir);
+                                } else {
+                                    contractNameForRecord = path.basename(effectiveContractDir);
+                                }
+                            } catch {
+                                contractNameForRecord = path.basename(effectiveContractDir);
+                            }
+                        } else if (deployableWasmPath) {
+                            contractNameForRecord = path.basename(deployableWasmPath);
                         } else {
                             contractNameForRecord = 'unknown';
                         }
@@ -353,6 +595,56 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                                     await tracker.recordDeployedVersion(
                                         path.join(contractRootDir, 'Cargo.toml'),
                                         contractNameForRecord || path.basename(contractRootDir),
+                            contractId: result.contractId,
+                            contractName: contractNameForRecord,
+                            deployedAt,
+                            network,
+                            source,
+                            transactionHash: result.transactionHash,
+                            signingMethod: signingResult?.method,
+                            signingValidated: signingResult?.validated,
+                            signerPublicKey: signingResult?.publicKey,
+                            payloadHash: signingResult?.payloadHash,
+                        };
+
+                        const deploymentInfo = {
+                            contractId: result.contractId,
+                            transactionHash: result.transactionHash,
+                            deployedAt,
+                            timestamp: deployedAt,
+                            network,
+                            source,
+                            signing: signingResult,
+                        };
+
+                        await context.workspaceState.update('lastContractId', result.contractId);
+                        await context.workspaceState.update('lastDeployment', deploymentInfo);
+
+                        // Update deployedContracts index
+                        const deployedContracts = context.workspaceState.get<Record<string, string>>(
+                            'stellarSuite.deployedContracts',
+                            {}
+                        );
+                        if (effectiveContractDir) {
+                            deployedContracts[effectiveContractDir] = result.contractId;
+                        }
+                        await context.workspaceState.update('stellarSuite.deployedContracts', deployedContracts);
+
+                        const deploymentHistory = context.workspaceState.get<any[]>(
+                            'stellarSuite.deploymentHistory',
+                            []
+                        );
+                        deploymentHistory.push(deploymentRecord);
+                        await context.workspaceState.update('stellarSuite.deploymentHistory', deploymentHistory);
+
+                        try {
+                            const tracker = sidebarProvider?.getVersionTracker();
+                            if (tracker && effectiveContractDir) {
+                                const localVersion = tracker.getLocalVersion(effectiveContractDir);
+                                if (localVersion) {
+                                    await tracker.recordDeployedVersion(
+                                        path.join(effectiveContractDir, 'Cargo.toml'),
+                                        contractNameForRecord,
                                         localVersion,
                                         {
                                             contractId: result.contractId,
@@ -382,8 +674,11 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                         }
 
                         // Show success notification with contract ID
+                        const signingSummary = signingResult
+                            ? `\nSigning: ${signingResult.method} (${signingResult.validated ? 'validated' : signingResult.status})`
+                            : '';
                         const action = await vscode.window.showInformationMessage(
-                            `Contract deployed successfully!\nContract ID: ${result.contractId}`,
+                            `Contract deployed successfully!\nContract ID: ${result.contractId}${signingSummary}`,
                             'Copy Contract ID',
                             'Use for Simulation'
                         );
@@ -395,6 +690,15 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                             vscode.commands.executeCommand('stellarSuite.simulateTransaction');
                         }
                     }
+                    operation.succeed('Deployment completed successfully', result.contractId);
+                } else if (
+                    token.isCancellationRequested ||
+                    result.errorSummary?.toLowerCase().includes('cancelled') ||
+                    result.error?.toLowerCase().includes('cancelled')
+                ) {
+                    outputChannel.appendLine('⚠️ Deployment cancelled by user.');
+                    operation.cancel('Deployment cancelled by user');
+                    vscode.window.showWarningMessage('Contract deployment cancelled.');
                 } else {
                     outputChannel.appendLine(`❌ Deployment failed!`);
                     outputChannel.appendLine(`Error: ${result.error || 'Unknown error'}`);
@@ -415,18 +719,28 @@ export async function deployContract(context: vscode.ExtensionContext, sidebarPr
                         outputChannel.appendLine('\n=== Deployment Output ===');
                         outputChannel.appendLine(result.deployOutput);
                     }
+                    if (result.buildOutput) {
+                        outputChannel.appendLine('\n=== Build Output ===');
+                        outputChannel.appendLine(result.buildOutput);
+                    }
 
                     const notificationMessage = result.errorSummary
                         ? `Deployment failed: ${result.errorSummary}`
                         : `Deployment failed: ${result.error}`;
+                    operation.fail(result.errorSummary ?? result.error ?? 'Deployment failed', notificationMessage);
                     vscode.window.showErrorMessage(notificationMessage);
                 }
-
-                progress.report({ increment: 100, message: 'Complete' });
+                } finally {
+                    progressSubscription.dispose();
+                }
             }
         );
     } catch (error) {
         const formatted = formatError(error, 'Deployment');
+        operation.fail(formatted.message, formatted.title);
         vscode.window.showErrorMessage(`${formatted.title}: ${formatted.message}`);
+    } finally {
+        operation.dispose();
+        statusBar.dispose();
     }
 }

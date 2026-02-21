@@ -1,6 +1,10 @@
 import { formatError } from '../utils/errorFormatter';
 import { CliErrorContext, CliErrorType } from '../utils/cliErrorParser';
 import { RpcLogger } from './rpcLogger';
+import { StateDiff, StateSnapshot } from '../types/simulationState';
+import { RpcRateLimiter } from './rpcRateLimitService';
+import { RateLimitEvent, RateLimitStatus } from '../types/rpcRateLimit';
+import * as vscode from 'vscode';
 
 export interface SimulationResult {
     success: boolean;
@@ -16,6 +20,11 @@ export interface SimulationResult {
         cpuInstructions?: number;
         memoryBytes?: number;
     };
+    validationWarnings?: string[];
+    rawResult?: unknown;
+    stateSnapshotBefore?: StateSnapshot;
+    stateSnapshotAfter?: StateSnapshot;
+    stateDiff?: StateDiff;
 }
 
 /**
@@ -24,11 +33,38 @@ export interface SimulationResult {
 export class RpcService {
     private rpcUrl: string;
     private logger?: any;
-
+    private authHeaders: Record<string, string> = {};
+    private rateLimiter: RpcRateLimiter;
     constructor(rpcUrl: string, logger?: any) {
         // Ensure URL ends with / for proper path joining
         this.rpcUrl = rpcUrl.endsWith('/') ? rpcUrl.slice(0, -1) : rpcUrl;
         this.logger = logger;
+
+        const config = vscode.workspace.getConfiguration('stellarSuite.rpc.rateLimit');
+        this.rateLimiter = new RpcRateLimiter({
+            maxRetries: config.get<number>('maxRetries', 3),
+            initialBackoffMs: config.get<number>('initialBackoffMs', 1000),
+            maxBackoffMs: config.get<number>('maxBackoffMs', 30000)
+        });
+
+        this.rateLimiter.onStatusChange((event: RateLimitEvent) => {
+            if (this.logger?.logRateLimitEvent) {
+                this.logger.logRateLimitEvent(event);
+            } else if (this.logger?.logRequest) {
+                // Fallback structured logging if native rate limit method doesn't exist
+                this.logger.logRequest('rate-limit', event.endpoint, event);
+            }
+
+            if (event.status === RateLimitStatus.RateLimited) {
+                vscode.window.showWarningMessage(
+                    event.message || `RPC Rate Limit hit for ${event.endpoint}. Retrying in background...`
+                );
+            } else if (event.status === RateLimitStatus.Healthy) {
+                vscode.window.showInformationMessage(
+                    event.message || `RPC Rate Limit recovered for ${event.endpoint}.`
+                );
+            }
+        });
     }
 
     /**
@@ -40,7 +76,7 @@ export class RpcService {
 
     /**
      * Simulate a Soroban contract function call using RPC.
-     * 
+     *
      * @param contractId - Contract ID (address)
      * @param functionName - Name of the function to call
      * @param args - Function arguments as array
@@ -75,11 +111,12 @@ export class RpcService {
             // Log the request if logger available
             const requestId = this.logger?.logRequest?.(method, url, requestBody);
 
-            // Make the RPC call
-            const response = await fetch(url, {
+            // Make the RPC call with rate limiting
+            const response = await this.rateLimiter.fetch(url, {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    ...this.authHeaders
                 },
                 body: JSON.stringify(requestBody),
                 signal: AbortSignal.timeout(30000) // 30 second timeout
@@ -111,11 +148,12 @@ export class RpcService {
 
             // Extract result from RPC response
             const result = data.result || data;
-            
+
             return {
                 success: true,
                 result: result.returnValue || result.result || result,
-                resourceUsage: result.resourceUsage || result.resource_usage
+                resourceUsage: result.resourceUsage || result.resource_usage,
+                rawResult: result,
             };
         } catch (error) {
             const errorMessage = this.formatErrorMessage(error);
@@ -150,7 +188,7 @@ export class RpcService {
 
     /**
      * Check if RPC endpoint is reachable.
-     * 
+     *
      * @returns True if endpoint is accessible
      */
     async isAvailable(): Promise<boolean> {
@@ -158,8 +196,9 @@ export class RpcService {
         const requestId = this.logger?.logRequest?.(method, `${this.rpcUrl}/health`, {});
 
         try {
-            const response = await fetch(`${this.rpcUrl}/health`, {
+            const response = await this.rateLimiter.fetch(`${this.rpcUrl}/health`, {
                 method: 'GET',
+                headers: { ...this.authHeaders },
                 signal: AbortSignal.timeout(5000)
             });
 
@@ -168,9 +207,9 @@ export class RpcService {
         } catch {
             // If health endpoint doesn't exist, try a simple RPC call
             try {
-                const response = await fetch(`${this.rpcUrl}/rpc`, {
+                const response = await this.rateLimiter.fetch(`${this.rpcUrl}/rpc`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', ...this.authHeaders },
                     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getHealth' }),
                     signal: AbortSignal.timeout(5000)
                 });
@@ -189,6 +228,20 @@ export class RpcService {
      */
     public setLogger(logger: any): void {
         this.logger = logger;
+    }
+
+    /**
+     * Set authentication headers for all RPC requests.
+     */
+    public setAuthHeaders(headers: Record<string, string>): void {
+        this.authHeaders = { ...headers };
+    }
+
+    /**
+     * Get the current RateLimiter instance
+     */
+    public getRateLimiter(): RpcRateLimiter {
+        return this.rateLimiter;
     }
 
     /**

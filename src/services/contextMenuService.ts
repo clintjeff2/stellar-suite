@@ -15,6 +15,7 @@ import {
     ActionFeedback,
     ContextMenuActionId,
 } from '../types/contextMenu';
+import { ContractTemplateService, TemplateDefinition } from './contractTemplateService';
 
 // ── Custom action registry ────────────────────────────────────
 // Allows other parts of the extension (or future plugins) to register
@@ -47,6 +48,8 @@ export function registerCustomContextAction(registration: CustomContextAction): 
 export function resolveContextMenuActions(req: ContextMenuRequest): ContextMenuAction[] {
     const hasContractId = !!req.contractId;
     const isBuilt = req.isBuilt;
+    const hasTemplateCategory = !!req.templateCategory &&
+        req.templateCategory.toLowerCase() !== 'unknown';
 
     const actions: ContextMenuAction[] = [
         // ── Build / Deploy ────────────────────────────────────
@@ -54,27 +57,36 @@ export function resolveContextMenuActions(req: ContextMenuRequest): ContextMenuA
             id: 'build',
             label: 'Build Contract',
             icon: 'tools',
-            shortcut: isBuilt ? undefined : undefined,
+            shortcut: 'B',
             enabled: true,
         },
         {
             id: 'deploy',
             label: 'Deploy Contract',
             icon: 'cloud-upload',
+            shortcut: 'D',
             enabled: isBuilt,
         },
         {
             id: 'simulate',
             label: 'Simulate Transaction',
             icon: 'play',
+            shortcut: 'S',
             enabled: hasContractId,
         },
         {
             id: 'inspect',
             label: 'Inspect Contract',
             icon: 'search',
+            shortcut: 'I',
             enabled: hasContractId,
             separatorBefore: false,
+        },
+        {
+            id: 'templateActions',
+            label: 'Template Actions…',
+            icon: 'symbol-method',
+            enabled: hasTemplateCategory,
         },
 
         // ── Clipboard / Navigation ────────────────────────────
@@ -118,6 +130,7 @@ export function resolveContextMenuActions(req: ContextMenuRequest): ContextMenuA
             id: 'pinContract',
             label: 'Pin to Top',
             icon: 'pin',
+            shortcut: 'P',
             enabled: true,
         },
         {
@@ -126,12 +139,19 @@ export function resolveContextMenuActions(req: ContextMenuRequest): ContextMenuA
             icon: 'globe',
             enabled: true,
         },
+        {
+            id: 'assignTemplate',
+            label: 'Assign Template…',
+            icon: 'symbol-class',
+            enabled: true,
+        },
 
         // ── Danger zone ───────────────────────────────────────
         {
             id: 'delete',
             label: 'Remove from Workspace',
             icon: 'trash',
+            shortcut: 'Del',
             enabled: true,
             destructive: true,
             separatorBefore: true,
@@ -158,12 +178,14 @@ export function resolveContextMenuActions(req: ContextMenuRequest): ContextMenuA
 
 export class ContractContextMenuService {
     private readonly outputChannel: vscode.OutputChannel;
+    private readonly templateService: ContractTemplateService;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
         outputChannel: vscode.OutputChannel
     ) {
         this.outputChannel = outputChannel;
+        this.templateService = new ContractTemplateService(this.outputChannel);
     }
 
     /**
@@ -177,6 +199,8 @@ export class ContractContextMenuService {
             path: req.contractPath,
             contractId: req.contractId,
             isBuilt: !!req.contractId,
+            templateId: req.templateId,
+            templateCategory: req.templateCategory,
         };
 
         try {
@@ -199,6 +223,8 @@ export class ContractContextMenuService {
                 case 'delete':            return await this.handleDelete(contract);
                 case 'pinContract':       return await this.handlePin(contract);
                 case 'setNetwork':        return await this.handleSetNetwork(contract);
+                case 'assignTemplate':    return await this.handleAssignTemplate(contract);
+                case 'templateActions':   return await this.handleTemplateActions(contract);
                 default:
                     this.outputChannel.appendLine(`[ContextMenu] Unknown action: ${req.actionId}`);
                     return { type: 'error', message: `Unknown action: ${req.actionId}` };
@@ -213,11 +239,13 @@ export class ContractContextMenuService {
     // ── Individual handlers ───────────────────────────────────
 
     private async handleBuild(contract: ContractInfo): Promise<ActionFeedback> {
+        await this.context.workspaceState.update('selectedContractPath', path.dirname(contract.path));
         await vscode.commands.executeCommand('stellarSuite.buildContract');
         return { type: 'info', message: `Building ${contract.name}…`, refresh: true };
     }
 
     private async handleDeploy(contract: ContractInfo): Promise<ActionFeedback> {
+        await this.context.workspaceState.update('selectedContractPath', path.dirname(contract.path));
         await vscode.commands.executeCommand('stellarSuite.deployContract');
         return { type: 'info', message: `Deploying ${contract.name}…`, refresh: true };
     }
@@ -279,7 +307,7 @@ export class ContractContextMenuService {
             title: 'Rename Contract',
             prompt: 'Enter a new display name for this contract',
             value: contract.name,
-            validateInput: (v) => {
+            validateInput: (v: string) => {
                 if (!v.trim()) { return 'Name cannot be empty.'; }
                 if (v.length > 64) { return 'Name must be 64 characters or fewer.'; }
                 return undefined;
@@ -315,7 +343,7 @@ export class ContractContextMenuService {
             title: 'Duplicate Contract',
             prompt: 'Enter a name for the duplicated contract folder',
             value: `${baseName}-copy`,
-            validateInput: (v) => {
+            validateInput: (v: string) => {
                 if (!v.trim()) { return 'Name cannot be empty.'; }
                 const dest = path.join(parentDir, v.trim());
                 if (fs.existsSync(dest)) { return `Directory "${v.trim()}" already exists.`; }
@@ -400,6 +428,110 @@ export class ContractContextMenuService {
 
         this.outputChannel.appendLine(`[ContextMenu] Set network for "${contract.name}" to "${selected}"`);
         return { type: 'success', message: `Network set to "${selected}" for ${contract.name}.`, refresh: true };
+    }
+
+    private async handleAssignTemplate(contract: ContractInfo): Promise<ActionFeedback> {
+        const customTemplates = this.loadCustomTemplatesForWorkspace();
+        const options = this.templateService.getTemplateAssignmentOptions(customTemplates);
+
+        const picks: Array<vscode.QuickPickItem & { value: string }> = [
+            ...options.map((option) => ({
+                label: option.label,
+                detail: option.description,
+                description: `${option.source} · ${option.category}`,
+                value: option.id,
+            })),
+            {
+                label: 'Clear Manual Assignment',
+                description: 'system',
+                detail: 'Remove manual override and use automatic template detection.',
+                value: '__clear__',
+            },
+        ];
+
+        const selected = await vscode.window.showQuickPick(picks, {
+            title: `Assign Template for ${contract.name}`,
+            placeHolder: 'Choose a template category or clear manual assignment.',
+            matchOnDescription: true,
+            matchOnDetail: true,
+        });
+
+        if (!selected) {
+            return { type: 'info', message: 'Template assignment cancelled.' };
+        }
+
+        const assignments = this.context.workspaceState.get<Record<string, string>>(
+            'stellarSuite.manualTemplateAssignments',
+            {}
+        );
+
+        if (selected.value === '__clear__') {
+            delete assignments[contract.path];
+            await this.context.workspaceState.update('stellarSuite.manualTemplateAssignments', assignments);
+            return { type: 'success', message: `Manual template assignment cleared for ${contract.name}.`, refresh: true };
+        }
+
+        assignments[contract.path] = selected.value;
+        await this.context.workspaceState.update('stellarSuite.manualTemplateAssignments', assignments);
+        return { type: 'success', message: `Template set to "${selected.label}" for ${contract.name}.`, refresh: true };
+    }
+
+    private async handleTemplateActions(contract: ContractInfo): Promise<ActionFeedback> {
+        const customTemplates = this.loadCustomTemplatesForWorkspace();
+        const actions = this.templateService.getTemplateActions(
+            contract.templateId,
+            contract.templateCategory,
+            customTemplates
+        );
+
+        if (!actions.length) {
+            return {
+                type: 'info',
+                message: `No template actions available for ${contract.name}. Assign a template first.`,
+            };
+        }
+
+        const picks = actions.map((action) => ({
+            label: action.label,
+            detail: action.description || `Action: ${action.id}`,
+            actionId: action.id,
+        }));
+
+        const selected = await vscode.window.showQuickPick(picks, {
+            title: `Template Actions — ${contract.name}`,
+            placeHolder: 'Choose a template-specific workflow to launch.',
+            matchOnDetail: true,
+        });
+
+        if (!selected) {
+            return { type: 'info', message: 'Template action cancelled.' };
+        }
+
+        // Reuse the existing simulation flow as the execution surface.
+        await vscode.commands.executeCommand('stellarSuite.simulateTransaction');
+        return {
+            type: 'info',
+            message: `${selected.label} selected for ${contract.name}. Opened simulation flow.`,
+        };
+    }
+
+    private loadCustomTemplatesForWorkspace(): TemplateDefinition[] {
+        const workspaceFolders = vscode.workspace.workspaceFolders || [];
+        const customTemplates: TemplateDefinition[] = [];
+        const seenTemplateIds = new Set<string>();
+
+        for (const folder of workspaceFolders) {
+            const loaded = this.templateService.loadTemplateConfiguration(folder.uri.fsPath);
+            for (const template of loaded.templates) {
+                if (seenTemplateIds.has(template.id)) {
+                    continue;
+                }
+                seenTemplateIds.add(template.id);
+                customTemplates.push(template);
+            }
+        }
+
+        return customTemplates;
     }
 }
 

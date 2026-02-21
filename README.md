@@ -78,6 +78,10 @@ The extension includes a sidebar panel that displays:
 - Deployment history
 - Quick actions for build, deploy, and simulate
 
+### Real-Time CLI Output
+
+Long-running CLI operations (like contract builds) stream `stdout` and `stderr` directly into VS Code output channels so you can monitor progress live, with cancellation support and bounded buffering for large logs.
+
 ## Installation
 
 ### From VS Code Marketplace
@@ -124,13 +128,28 @@ The extension includes a sidebar panel that displays:
    - Select compiled WASM file
    - Select network
    - Select source account
+   - Choose deployment signing method
 
 Stellar Suite will:
 
 - Run build and deployment using the official CLI
+- Run signing workflow before deployment submission
 - Capture the deployed contract ID
 - Display results inside VS Code
 - Save deployment metadata for later use
+
+### Deployment Signing Workflow
+
+Deployment now includes a signing phase before transaction submission. Supported methods:
+
+- Interactive signing (prompt for secret key)
+- Keypair file signing
+- Stored keypair signing from VS Code secure storage
+- Hardware wallet signature verification (external sign + paste signature)
+- Source-account delegated signing via Stellar CLI
+
+For hardware wallet signing, Stellar Suite copies the payload hash to clipboard and validates the returned signature before deploy.
+For local keypair signing and signature verification, install `@stellar/stellar-sdk` in the extension development environment.
 
 ### Building a Contract
 
@@ -165,9 +184,41 @@ The Stellar Suite sidebar provides a visual interface for managing contracts:
 
 - View all detected contracts in your workspace
 - See build status at a glance
+- See detected contract template/category (token, escrow, voting, custom, unknown)
 - Access quick actions (Build, Deploy, Simulate)
+- Run template-specific actions from the contract card/context menu
+- Manually assign template categories from the context menu
 - View deployment history
 - Inspect contract functions
+
+### Contract Template Configuration
+
+Stellar Suite supports custom template definitions through a workspace config file:
+
+- `stellar-suite.templates.json` (workspace root), or
+- `.stellar-suite/templates.json`
+
+Example:
+
+```json
+{
+  "version": "1",
+  "templates": [
+    {
+      "id": "amm",
+      "displayName": "AMM",
+      "category": "amm",
+      "keywords": ["swap", "liquidity_pool"],
+      "dependencies": ["soroban-sdk"],
+      "actions": [
+        { "id": "amm.swap", "label": "Swap Assets" }
+      ]
+    }
+  ]
+}
+```
+
+Each template can define keyword, dependency, and path hints used for detection. Unknown contracts are shown as `Unknown / Unclassified` until matched or manually assigned.
 
 ## Configuration
 
@@ -193,6 +244,18 @@ RPC endpoint URL for transaction simulation when not using local CLI.
 
 Use local Stellar CLI instead of RPC endpoint.
 
+### `stellarSuite.signing.defaultMethod`
+
+Default signing method used when deployment signing begins.
+
+### `stellarSuite.signing.requireValidatedSignature`
+
+Require a validated signature before deployment is submitted.
+
+### `stellarSuite.signing.enableSecureKeyStorage`
+
+Allow saving keypairs in VS Code SecretStorage for reuse.
+
 **Example:**
 
 ```json
@@ -201,7 +264,10 @@ Use local Stellar CLI instead of RPC endpoint.
   "stellarSuite.cliPath": "stellar",
   "stellarSuite.source": "dev",
   "stellarSuite.rpcUrl": "https://soroban-testnet.stellar.org:443",
-  "stellarSuite.useLocalCli": true
+  "stellarSuite.useLocalCli": true,
+  "stellarSuite.signing.defaultMethod": "interactive",
+  "stellarSuite.signing.requireValidatedSignature": true,
+  "stellarSuite.signing.enableSecureKeyStorage": true
 }
 ```
 
@@ -226,6 +292,7 @@ Stellar Suite is being developed in stages.
 
 - Run contract simulations before invoking transactions
 - Display execution results in a readable interface
+- Show storage state diff (created/modified/deleted entries)
 - Show authorization requirements
 - Display resource usage metrics
 
@@ -301,11 +368,24 @@ Watch mode:
 npm run watch
 ```
 
-Run tests:
+Run tests (executes the full suite):
 
 ```bash
 npm test
 ```
+
+Run specific test suites (e.g., contract deployer tests):
+
+```bash
+npm run test:contract-deployer
+```
+
+Deployment workflow integration suite:
+
+```bash
+npm run test:deployment-workflow-integration
+```
+*Note: Unit tests are fully isolated and use mock implementations to prevent actual CLI execution or network access during testing.*
 
 ### Running Locally
 
